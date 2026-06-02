@@ -16,7 +16,7 @@ export function buildOpenClawGatewayConfig(v: CreateConfigValues): Record<string
   const ac: Record<string, unknown> = {};
   if (v.url) ac.url = v.url;
   ac.timeoutSec = 120;
-  ac.waitTimeoutMs = 120000;
+  ac.waitTimeoutMs = 1_200_000;
   ac.sessionKeyStrategy = "issue";
   ac.role = "operator";
   ac.scopes = ["operator.admin"];

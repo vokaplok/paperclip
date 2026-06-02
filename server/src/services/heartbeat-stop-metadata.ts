@@ -70,6 +70,30 @@ export function resolveHeartbeatRunTimeoutPolicy(
   const rawTimeoutSec = hasTimeoutSec ? readFiniteNumber(config.timeoutSec) : defaultTimeoutSec;
   const timeoutSec = Math.max(0, Math.floor(rawTimeoutSec ?? defaultTimeoutSec));
 
+  // For openclaw_gateway the actual execution wait sent to the gateway is
+  // `waitTimeoutMs` (see adapter execute.ts lines 1103/1363).  Mirror that
+  // resolution here so effectiveTimeoutSec reflects the real agent execution
+  // window instead of the legacy timeoutSec default (120 s).
+  //
+  // execute.ts resolution:
+  //   timeoutMs      = timeoutSec > 0 ? timeoutSec * 1000 : 0
+  //   waitTimeoutMs  = config.waitTimeoutMs ?? (timeoutMs > 0 ? timeoutMs : 30_000)
+  if (adapterType === "openclaw_gateway" && hasOwn(config, "waitTimeoutMs")) {
+    const rawWaitMs = readFiniteNumber(config.waitTimeoutMs);
+    const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
+    const waitMs =
+      rawWaitMs != null && rawWaitMs > 0
+        ? rawWaitMs
+        : timeoutMs > 0
+          ? timeoutMs
+          : 30_000;
+    return {
+      effectiveTimeoutSec: Math.floor(waitMs / 1000),
+      timeoutConfigured: waitMs > 0,
+      timeoutSource: "config",
+    };
+  }
+
   return {
     effectiveTimeoutSec: timeoutSec,
     timeoutConfigured: timeoutSec > 0,

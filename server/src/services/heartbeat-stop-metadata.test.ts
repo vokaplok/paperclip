@@ -117,4 +117,37 @@ describe("heartbeat stop metadata", () => {
       timeoutFired: false,
     });
   });
+
+  it("derives effectiveTimeoutSec from waitTimeoutMs when explicitly configured for openclaw_gateway", () => {
+    // Agents updated via GEN-321 have waitTimeoutMs: 1_200_000 but no explicit
+    // timeoutSec.  effectiveTimeoutSec must reflect the real execution window.
+    expect(
+      resolveHeartbeatRunTimeoutPolicy("openclaw_gateway", { waitTimeoutMs: 1_200_000 }),
+    ).toEqual({
+      effectiveTimeoutSec: 1200,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+  });
+
+  it("falls back to timeoutSec-derived ms when waitTimeoutMs is zero/invalid for openclaw_gateway", () => {
+    expect(
+      resolveHeartbeatRunTimeoutPolicy("openclaw_gateway", { waitTimeoutMs: 0, timeoutSec: 300 }),
+    ).toEqual({
+      effectiveTimeoutSec: 300,
+      timeoutConfigured: true,
+      timeoutSource: "config",
+    });
+  });
+
+  it("uses 30 s floor when both timeoutSec and waitTimeoutMs are absent/zero for openclaw_gateway", () => {
+    // No explicit waitTimeoutMs → old path: effectiveTimeoutSec from timeoutSec default (120).
+    expect(
+      resolveHeartbeatRunTimeoutPolicy("openclaw_gateway", {}),
+    ).toEqual({
+      effectiveTimeoutSec: 120,
+      timeoutConfigured: true,
+      timeoutSource: "default",
+    });
+  });
 });
