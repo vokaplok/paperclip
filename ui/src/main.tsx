@@ -1,3 +1,18 @@
+// PILOT: subpath fetch interceptor (prepends BASE_URL to absolute /api/* fetches)
+(() => {
+  const BASE = (import.meta as any).env?.BASE_URL?.replace(/\/$/, "") || "";
+  if (!BASE) return;
+  const orig = window.fetch.bind(window);
+  window.fetch = (input: any, init?: any) => {
+    if (typeof input === "string" && input.startsWith("/api/")) input = BASE + input;
+    else if (input && typeof input === "object" && typeof input.url === "string" && input.url.startsWith("/api/")) input = new Request(BASE + input.url, input);
+    return orig(input, init);
+  };
+  const wsOrig = window.WebSocket;
+  // @ts-ignore
+  window.WebSocket = function(url: string, p?: any) { if (typeof url === "string" && url.startsWith("/")) url = location.protocol.replace("http","ws") + "//" + location.host + BASE + url; return new wsOrig(url, p); };
+})();
+
 import * as React from "react";
 import { StrictMode } from "react";
 import * as ReactDOM from "react-dom";
@@ -46,7 +61,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
-        <BrowserRouter>
+        <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, "") || "/"}>
           <CompanyProvider>
             <EditorAutocompleteProvider>
               <ToastProvider>

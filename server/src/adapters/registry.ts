@@ -105,6 +105,8 @@ import {
 import {
   execute as openclawGatewayExecute,
   testEnvironment as openclawGatewayTestEnvironment,
+  listSkills as listOpenclawGatewaySkills,
+  syncSkills as syncOpenclawGatewaySkills,
 } from "@paperclipai/adapter-openclaw-gateway/server";
 import {
   agentConfigurationDoc as openclawGatewayAgentConfigurationDoc,
@@ -385,6 +387,8 @@ const openclawGatewayAdapter: ServerAdapterModule = {
   type: "openclaw_gateway",
   execute: openclawGatewayExecute,
   testEnvironment: openclawGatewayTestEnvironment,
+  listSkills: listOpenclawGatewaySkills,
+  syncSkills: syncOpenclawGatewaySkills,
   models: openclawGatewayModels,
   supportsLocalAgentJwt: false,
   supportsInstructionsBundle: false,

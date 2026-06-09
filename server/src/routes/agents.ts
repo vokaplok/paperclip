@@ -73,7 +73,7 @@ import {
   refreshAdapterModels,
   requireServerAdapter,
 } from "../adapters/index.js";
-import { redactEventPayload } from "../redaction.js";
+import { redactEventPayload, REDACTED_EVENT_VALUE } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -528,7 +528,7 @@ export function agentRoutes(
     ]);
 
     return {
-      ...(options?.restricted ? redactForRestrictedAgentView(agent) : agent),
+      ...(options?.restricted ? redactForRestrictedAgentView(agent) : redactAgentConfigSecrets(agent)),
       chainOfCommand,
       access: accessState,
     };
@@ -1260,6 +1260,73 @@ export function agentRoutes(
     };
   }
 
+  // Secret-bearing adapterConfig/runtimeConfig keys must never be serialized over
+  // HTTP (device private keys, gateway passwords, API keys). Matches exactly
+  // password / paperclipApiKey / devicePrivateKeyPem and similar; leaves url,
+  // model, scopes, waitTimeoutMs, sessionKey, idempotencyKey, etc. untouched.
+  const AGENT_SECRET_CONFIG_KEY_RE = /(password|secret|token|apikey|privatekey|pem)$/i;
+
+  function redactSecretRecord(cfg: unknown): unknown {
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return cfg;
+    const src = cfg as Record<string, unknown>;
+    let changed = false;
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(src)) {
+      if (AGENT_SECRET_CONFIG_KEY_RE.test(key) && value != null && value !== "") {
+        out[key] = REDACTED_EVENT_VALUE;
+        changed = true;
+      } else {
+        out[key] = value;
+      }
+    }
+    return changed ? out : src;
+  }
+
+  function redactAgentConfigSecrets<T>(agent: T): T {
+    if (!agent || typeof agent !== "object") return agent;
+    const a = agent as Record<string, unknown>;
+    const next: Record<string, unknown> = { ...a };
+    if (a.adapterConfig && typeof a.adapterConfig === "object") {
+      next.adapterConfig = redactSecretRecord(a.adapterConfig);
+    }
+    const rt = a.runtimeConfig;
+    if (rt && typeof rt === "object" && !Array.isArray(rt)) {
+      const rtRec = rt as Record<string, unknown>;
+      const mp = rtRec.modelProfiles;
+      if (mp && typeof mp === "object" && !Array.isArray(mp)) {
+        const mpRec = mp as Record<string, unknown>;
+        const nextMp: Record<string, unknown> = {};
+        for (const [pk, pv] of Object.entries(mpRec)) {
+          if (pv && typeof pv === "object" && !Array.isArray(pv) && (pv as Record<string, unknown>).adapterConfig) {
+            nextMp[pk] = { ...(pv as Record<string, unknown>), adapterConfig: redactSecretRecord((pv as Record<string, unknown>).adapterConfig) };
+          } else {
+            nextMp[pk] = pv;
+          }
+        }
+        next.runtimeConfig = { ...rtRec, modelProfiles: nextMp };
+      }
+    }
+    return next as T;
+  }
+
+  // Inverse of redactSecretRecord for the write path: when a client sends a secret
+  // field back as the redaction sentinel (the UI replaces the whole adapterConfig),
+  // restore the real stored value so a redacted round-trip never erases a secret.
+  function restoreRedactedAdapterConfigSecrets(
+    requested: Record<string, unknown>,
+    existing: Record<string, unknown>,
+  ): void {
+    for (const key of Object.keys(requested)) {
+      if (AGENT_SECRET_CONFIG_KEY_RE.test(key) && requested[key] === REDACTED_EVENT_VALUE) {
+        if (existing[key] !== undefined) {
+          requested[key] = existing[key];
+        } else {
+          delete requested[key];
+        }
+      }
+    }
+  }
+
   function redactForRestrictedAgentView(agent: Awaited<ReturnType<typeof svc.getById>>) {
     if (!agent) return null;
     return {
@@ -1604,7 +1671,7 @@ export function agentRoutes(
     const result = await svc.list(companyId);
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs) {
-      res.json(result);
+      res.json(result.map((agent) => redactAgentConfigSecrets(agent)));
       return;
     }
     res.json(result.map((agent) => redactForRestrictedAgentView(agent)));
@@ -1874,7 +1941,7 @@ export function agentRoutes(
       details: { revisionId },
     });
 
-    res.json(updated);
+    res.json(redactAgentConfigSecrets(updated));
   });
 
   router.get("/agents/:id/runtime-state", async (req, res) => {
@@ -2560,6 +2627,7 @@ export function agentRoutes(
         res.status(422).json({ error: "adapterConfig must be an object" });
         return;
       }
+      restoreRedactedAdapterConfigSecrets(adapterConfig, asRecord(existing.adapterConfig) ?? {});
       assertNoAgentAdapterConfigMutation(req, adapterConfig);
       const changingInstructionsConfig = adapterConfigTouchesInstructionsConfig(adapterConfig);
       if (changingInstructionsConfig) {

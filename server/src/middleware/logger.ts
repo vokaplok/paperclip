@@ -27,6 +27,17 @@ const sharedOpts = {
   singleLine: true,
 };
 
+const SECRET_BODY_KEY_RE = /pass(word)?|secret|token|api[_-]?key|private[_-]?key|pem|credential|connection[_-]?string|authorization/i;
+function redactReqBody(v: unknown, depth = 0): unknown {
+  if (!v || typeof v !== "object" || depth > 4) return v;
+  if (Array.isArray(v)) return v.map((x) => redactReqBody(x, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    out[k] = SECRET_BODY_KEY_RE.test(k) ? "***REDACTED***" : redactReqBody(val, depth + 1);
+  }
+  return out;
+}
+
 export const logger = pino({
   level: "debug",
   redact: ["req.headers.authorization"],
@@ -69,7 +80,7 @@ export const httpLogger = pinoHttp({
       if (ctx) {
         return {
           errorContext: ctx.error,
-          reqBody: ctx.reqBody,
+          reqBody: redactReqBody(ctx.reqBody),
           reqParams: ctx.reqParams,
           reqQuery: ctx.reqQuery,
         };
@@ -77,7 +88,7 @@ export const httpLogger = pinoHttp({
       const props: Record<string, unknown> = {};
       const { body, params, query } = req as any;
       if (body && typeof body === "object" && Object.keys(body).length > 0) {
-        props.reqBody = body;
+        props.reqBody = redactReqBody(body);
       }
       if (params && typeof params === "object" && Object.keys(params).length > 0) {
         props.reqParams = params;

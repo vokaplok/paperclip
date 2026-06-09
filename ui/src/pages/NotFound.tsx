@@ -21,7 +21,7 @@ export function NotFoundPage({ scope = "global", requestedPrefix }: NotFoundPage
     setBreadcrumbs([{ label: "Not Found" }]);
   }, [setBreadcrumbs]);
 
-  const fallbackCompany = selectedCompany ?? companies[0] ?? null;
+  const fallbackCompany = selectedCompany ?? (companies.find(c => c.status !== 'archived') ?? companies[0]) ?? null;
   const dashboardHref = fallbackCompany ? `/${fallbackCompany.issuePrefix}/dashboard` : "/";
   const currentPath = `${location.pathname}${location.search}${location.hash}`;
   const normalizedPrefix = requestedPrefix?.toUpperCase();

@@ -86,7 +86,14 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
-const PROTOCOL_VERSION = 3;
+// Gateway WS protocol. OpenClaw 5.27+ gateways require v4 (and reject v3); older gateways speak v3.
+// We advertise a RANGE [min..max] so this adapter connects to BOTH v3 and v4 gateways and the
+// gateway negotiates the highest mutually-supported version. The adapter is a plain request/response
+// client whose message loop ignores unknown frames, so the additive v4 deltaText/replace frames are
+// harmless. — protocol-range 2026-05-30
+const MIN_PROTOCOL_VERSION = 3;
+const MAX_PROTOCOL_VERSION = 4;
+const PROTOCOL_VERSION = MAX_PROTOCOL_VERSION;
 const DEFAULT_SCOPES = ["operator.admin"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -344,6 +351,11 @@ function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: Wak
     PAPERCLIP_RUN_ID: ctx.runId,
   };
 
+  const inlineApiKey = nonEmpty(ctx.config.paperclipApiKey);
+  if (inlineApiKey) {
+    paperclipEnv.PAPERCLIP_API_KEY = inlineApiKey;
+  }
+
   if (paperclipApiUrlOverride) {
     paperclipEnv.PAPERCLIP_API_URL = paperclipApiUrlOverride;
   }
@@ -372,6 +384,7 @@ function buildWakeText(
     "PAPERCLIP_AGENT_ID",
     "PAPERCLIP_COMPANY_ID",
     "PAPERCLIP_API_URL",
+    "PAPERCLIP_API_KEY",
     "PAPERCLIP_TASK_ID",
     "PAPERCLIP_WAKE_REASON",
     "PAPERCLIP_WAKE_COMMENT_ID",
@@ -387,6 +400,7 @@ function buildWakeText(
     envLines.push(`${key}=${value}`);
   }
 
+  const hasInlineApiKey = !!paperclipEnv.PAPERCLIP_API_KEY;
   const issueIdHint = payload.taskId ?? payload.issueId ?? "";
   const apiBaseHint = paperclipEnv.PAPERCLIP_API_URL ?? "<set PAPERCLIP_API_URL>";
 
@@ -397,9 +411,11 @@ function buildWakeText(
     "",
     "Set these values in your run context:",
     ...envLines,
-    `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
+    ...(hasInlineApiKey ? [] : [`PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`]),
     "",
-    `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
+    ...(hasInlineApiKey
+      ? [`PAPERCLIP_API_KEY is provided in the run env above; do not read ${claimedApiKeyPath}.`]
+      : [`Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`]),
     "",
     `api_base=${apiBaseHint}`,
     `task_id=${payload.taskId ?? ""}`,
@@ -871,8 +887,8 @@ async function autoApproveDevicePairing(params: {
 
     await client.connect(
       () => ({
-        minProtocol: PROTOCOL_VERSION,
-        maxProtocol: PROTOCOL_VERSION,
+        minProtocol: MIN_PROTOCOL_VERSION,
+        maxProtocol: MAX_PROTOCOL_VERSION,
         client: {
           id: params.clientId,
           version: params.clientVersion,
@@ -1139,7 +1155,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     idempotencyKey: ctx.runId,
   };
   delete agentParams.text;
-  agentParams.paperclip = paperclipPayload;
+  // agentParams.paperclip = paperclipPayload;  // PILOT: stripped for legacy gateway
 
   const configuredAgentId = nonEmpty(ctx.config.agentId);
   if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
@@ -1184,6 +1200,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
   let autoPairAttempted = false;
+  // Bounded reconnect across a transient gateway bounce (e.g. config reload /
+  // restart). A refused TCP connect can only happen before the run is accepted
+  // server-side, and the wake payload carries idempotencyKey=ctx.runId, so the
+  // gateway dedupes a re-sent agent request — making this retry duplicate-safe.
+  const connectMaxRetries = parseOptionalPositiveInteger(ctx.config.connectMaxRetries) ?? 5;
+  let connectRetryAttempts = 0;
   let latestResultPayload: unknown = null;
 
   while (true) {
@@ -1263,8 +1285,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const hello = await client.connect((nonce) => {
         const signedAtMs = Date.now();
         const connectParams: Record<string, unknown> = {
-          minProtocol: PROTOCOL_VERSION,
-          maxProtocol: PROTOCOL_VERSION,
+          minProtocol: MIN_PROTOCOL_VERSION,
+          maxProtocol: MAX_PROTOCOL_VERSION,
           client: {
             id: clientId,
             version: clientVersion,
@@ -1472,6 +1494,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           "stderr",
           `[openclaw-gateway] auto-pairing failed: ${pairResult.reason}\n`,
         );
+      }
+
+      // Transient gateway-bounce signatures surface only at TCP/handshake time,
+      // before the run is accepted server-side. Reconnect with backoff instead of
+      // failing the whole run (idempotencyKey guards against duplicate execution).
+      const connectionUnreachable =
+        !pairingRequired &&
+        (lower.includes("econnrefused") ||
+          lower.includes("connection refused") ||
+          lower.includes("socket hang up") ||
+          lower.includes("econnreset") ||
+          lower.includes("ehostunreach") ||
+          lower.includes("enetunreach") ||
+          (lower.includes("connect") && lower.includes("etimedout")));
+      if (connectionUnreachable && connectRetryAttempts < connectMaxRetries) {
+        connectRetryAttempts += 1;
+        const backoffMs = Math.min(1000 * 2 ** (connectRetryAttempts - 1), 8000);
+        await ctx.onLog(
+          "stderr",
+          `[openclaw-gateway] gateway unreachable (${message}); reconnect attempt ${connectRetryAttempts}/${connectMaxRetries} in ${backoffMs}ms\n`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
       }
 
       const detailedMessage = pairingRequired

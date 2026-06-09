@@ -39,6 +39,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import type { Agent } from "@paperclipai/shared";
 
 const AGENT_SORT_CHOICES: SidebarSectionRadioChoice[] = [
@@ -74,6 +79,134 @@ function sortAgents(agents: Agent[], sortMode: AgentSidebarSortMode): Agent[] {
       : left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
   });
   return sorted;
+}
+
+function shortModelLabel(model: string): string {
+  const withoutProvider = model.includes("/") ? (model.split("/").at(-1) ?? model) : model;
+  return withoutProvider.replace(/^claude-/, "");
+}
+
+function AgentModelBadge({ agent }: { agent: Agent }) {
+  const [open, setOpen] = useState(false);
+  const [phase, setPhase] = useState<"list" | "confirm">("list");
+  const { pushToast } = useToastActions();
+  const queryClient = useQueryClient();
+
+  const currentModel = typeof agent.adapterConfig.model === "string"
+    ? agent.adapterConfig.model
+    : null;
+
+  const { data: models = [], isLoading } = useQuery({
+    queryKey: ["adapterModels", agent.companyId, agent.adapterType],
+    queryFn: () => agentsApi.adapterModels(agent.companyId, agent.adapterType),
+    enabled: open,
+    staleTime: 30_000,
+  });
+
+  const updateModel = useMutation({
+    mutationFn: (modelId: string) =>
+      agentsApi.update(agent.id, {
+        adapterConfig: { ...agent.adapterConfig, model: modelId },
+      }, agent.companyId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(agent.companyId) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agent.id) });
+      setPhase("confirm");
+    },
+    onError: () => {
+      pushToast({ title: "Failed to update model", tone: "error" });
+    },
+  });
+
+  const resetSession = useMutation({
+    mutationFn: () => agentsApi.resetSession(agent.id, null, agent.companyId),
+    onSuccess: () => {
+      pushToast({ title: "Session restarted", tone: "success" });
+      setOpen(false);
+    },
+    onError: () => {
+      pushToast({ title: "Failed to restart session", tone: "error" });
+    },
+  });
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v);
+        if (!v) setPhase("list");
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          className="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/60 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+          aria-label={currentModel ? `Model: ${currentModel}. Click to switch.` : "Using default model. Click to set."}
+        >
+          {currentModel ? shortModelLabel(currentModel) : "default"}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-56 p-1" align="end" side="right">
+        {phase === "list" ? (
+          <>
+            <p className="px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground font-medium">
+              Switch model
+            </p>
+            {isLoading ? (
+              <p className="px-2 py-2 text-xs text-muted-foreground">Loading…</p>
+            ) : models.length === 0 ? (
+              <p className="px-2 py-2 text-xs text-muted-foreground">No models available</p>
+            ) : (
+              models.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className="flex items-center w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 gap-2 disabled:opacity-50"
+                  onClick={() => updateModel.mutate(m.id)}
+                  disabled={updateModel.isPending || m.id === currentModel}
+                >
+                  <span className="flex-1 text-left truncate font-mono">{m.label}</span>
+                  {m.id === currentModel && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 shrink-0">
+                      current
+                    </span>
+                  )}
+                </button>
+              ))
+            )}
+          </>
+        ) : (
+          <div className="p-2 space-y-2">
+            <p className="text-xs font-medium text-foreground">Model updated</p>
+            <p className="text-[11px] text-muted-foreground">
+              Applies on next session. Restart now?
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="flex-1 text-xs px-2 py-1 rounded border border-border hover:bg-accent/50 transition-colors"
+                onClick={() => setOpen(false)}
+              >
+                Later
+              </button>
+              <button
+                type="button"
+                className="flex-1 text-xs px-2 py-1 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                onClick={() => resetSession.mutate()}
+                disabled={resetSession.isPending}
+              >
+                {resetSession.isPending ? "Restarting…" : "Restart now"}
+              </button>
+            </div>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 function SidebarAgentItem({
@@ -125,7 +258,10 @@ function SidebarAgentItem({
         )}
       >
         <AgentIcon icon={agent.icon} className="shrink-0 h-3.5 w-3.5 text-muted-foreground" />
-        <span className="flex-1 truncate">{agent.name}</span>
+        <span className="flex-1 min-w-0 flex items-center gap-1">
+          <span className="truncate min-w-0">{agent.name}</span>
+          <AgentModelBadge agent={agent} />
+        </span>
         {(agent.pauseReason === "budget" || runCount > 0) && (
           <span className="ml-auto flex items-center gap-1.5 shrink-0">
             {agent.pauseReason === "budget" ? (

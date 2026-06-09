@@ -41,6 +41,8 @@ function buildContext(
 
 async function createMockGatewayServer(options?: {
   waitPayload?: Record<string, unknown>;
+  port?: number;
+  deferListen?: boolean;
 }) {
   const server = createServer();
   const wss = new WebSocketServer({ server });
@@ -153,23 +155,42 @@ async function createMockGatewayServer(options?: {
     });
   });
 
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
+  const listenOnce = (p: number) =>
+    new Promise<void>((resolve) => {
+      server.listen(p, "127.0.0.1", () => resolve());
+    });
 
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Failed to resolve test server address");
+  let resolvedPort = options?.port ?? 0;
+  if (!options?.deferListen) {
+    await listenOnce(resolvedPort);
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Failed to resolve test server address");
+    }
+    resolvedPort = address.port;
   }
 
   return {
-    url: `ws://127.0.0.1:${address.port}`,
+    url: `ws://127.0.0.1:${resolvedPort}`,
     getAgentPayload: () => agentPayload,
+    listen: async () => {
+      await listenOnce(resolvedPort);
+    },
     close: async () => {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
+}
+
+async function reserveFreePort(): Promise<number> {
+  const srv = createServer();
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", () => resolve()));
+  const addr = srv.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  await new Promise<void>((resolve) => srv.close(() => resolve()));
+  if (!port) throw new Error("Failed to reserve a free port");
+  return port;
 }
 
 async function createMockGatewayServerWithPairing() {
@@ -514,6 +535,48 @@ describe("openclaw gateway adapter execute", () => {
       await gateway.close();
     }
   });
+
+  it("reconnects across a transient gateway bounce instead of failing the run", async () => {
+    // Simulate a gateway restart: nothing is listening when the run starts, so
+    // the first connect is refused. The adapter must back off and reconnect
+    // once the gateway is back, completing the run instead of failing it.
+    const port = await reserveFreePort();
+    const gateway = await createMockGatewayServer({ port, deferListen: true });
+    const logs: string[] = [];
+
+    try {
+      const exec = execute(
+        buildContext(
+          {
+            url: gateway.url,
+            headers: { "x-openclaw-token": "gateway-token" },
+            payloadTemplate: { message: "wake now" },
+            waitTimeoutMs: 2000,
+            connectMaxRetries: 6,
+          },
+          {
+            onLog: async (_stream, chunk) => {
+              logs.push(chunk);
+            },
+          },
+        ),
+      );
+
+      // Bring the gateway up after the first refused connect + backoff window.
+      const lateStart = setTimeout(() => {
+        void gateway.listen();
+      }, 1500);
+
+      const result = await exec;
+      clearTimeout(lateStart);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.timedOut).toBe(false);
+      expect(logs.some((entry) => entry.includes("reconnect attempt"))).toBe(true);
+    } finally {
+      await gateway.close();
+    }
+  }, 20_000);
 
   it("fails fast when url is missing", async () => {
     const result = await execute(buildContext({}));
