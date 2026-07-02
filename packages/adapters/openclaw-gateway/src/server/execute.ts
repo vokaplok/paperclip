@@ -17,6 +17,24 @@ import { WebSocket } from "ws";
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
 
+// PATCH(assoonas:transient-classification): wake failures whose upstream cause is
+// transient (model rate limits, provider overload, session-lock contention) must
+// surface errorFamily "transient_upstream" so the server's bounded retry ladder
+// (2m/10m/30m/2h, heartbeat.ts scheduleBoundedRetryForRun) re-fires the wake
+// instead of dropping it permanently. Mirrors claude-local/codex-local adapters.
+// Deliberately excludes session-takeover and post-accept timeouts: those runs may
+// have already executed side effects, so an automatic re-run could duplicate work.
+const OPENCLAW_GATEWAY_TRANSIENT_UPSTREAM_RE =
+  /(?:rate[-\s]?limit(?:ed)?|rate_limit_error|too\s+many\s+requests|\b429\b|overloaded(?:_error)?|server\s+overloaded|service\s+unavailable|\b503\b|\b529\b|high\s+demand|try\s+again\s+later|temporarily\s+unavailable|throttl(?:ed|ing)|usage\s+limit\s+reached|usage\s+cap\s+reached|weekly\s+limit\s+reached|5[-\s]?hour\s+limit\s+reached|sessionwritelocktimeouterror|session\s+file\s+locked)/i;
+
+function transientUpstreamErrorFamily(
+  errorMessage: string | null | undefined,
+): "transient_upstream" | null {
+  return errorMessage && OPENCLAW_GATEWAY_TRANSIENT_UPSTREAM_RE.test(errorMessage)
+    ? "transient_upstream"
+    : null;
+}
+
 type WakePayload = {
   runId: string;
   agentId: string;
@@ -1359,6 +1377,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           timedOut: false,
           errorMessage,
           errorCode: "openclaw_gateway_agent_error",
+          errorFamily: transientUpstreamErrorFamily(errorMessage),
           resultJson: acceptedPayload,
         };
       }
@@ -1385,15 +1404,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
 
         if (waitStatus === "error") {
+          const waitErrorMessage =
+            nonEmpty(waitPayload?.error) ??
+            lifecycleError ??
+            "OpenClaw gateway run failed";
           return {
             exitCode: 1,
             signal: null,
             timedOut: false,
-            errorMessage:
-              nonEmpty(waitPayload?.error) ??
-              lifecycleError ??
-              "OpenClaw gateway run failed",
+            errorMessage: waitErrorMessage,
             errorCode: "openclaw_gateway_wait_error",
+            errorFamily: transientUpstreamErrorFamily(waitErrorMessage),
             resultJson: waitPayload,
           };
         }
@@ -1535,6 +1556,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           : pairingRequired
             ? "openclaw_gateway_pairing_required"
             : "openclaw_gateway_request_failed",
+        // Transient only when no run was ever accepted gateway-side: retrying a
+        // never-started wake cannot duplicate work. pairingRequired needs a human.
+        errorFamily:
+          latestResultPayload == null &&
+          !pairingRequired &&
+          (connectionUnreachable || transientUpstreamErrorFamily(message) != null)
+            ? "transient_upstream"
+            : null,
         resultJson: asRecord(latestResultPayload),
       };
     } finally {

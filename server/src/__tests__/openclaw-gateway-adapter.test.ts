@@ -523,12 +523,10 @@ describe("openclaw gateway adapter execute", () => {
       );
       expect(String(payload?.message ?? "")).toContain("First comment");
       expect(String(payload?.message ?? "")).toContain("\"commentIds\":[\"comment-1\",\"comment-2\"]");
-      expect(payload?.paperclip).toMatchObject({
-        wake: {
-          latestCommentId: "comment-2",
-          commentIds: ["comment-1", "comment-2"],
-        },
-      });
+      // Local PILOT patch (execute.ts): the structured paperclip block is
+      // deliberately NOT forwarded to the legacy gateway — wake context travels
+      // in the rendered message instead. Guard the strip so it isn't undone.
+      expect(payload?.paperclip).toBeUndefined();
 
       expect(logs.some((entry) => entry.includes("[openclaw-gateway:event] run=run-123 stream=assistant"))).toBe(true);
     } finally {
@@ -631,6 +629,104 @@ describe("openclaw gateway adapter execute", () => {
       await gateway.close();
     }
   });
+
+  it("classifies model rate-limit wait errors as transient_upstream", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: {
+        runId: "run-123",
+        status: "error",
+        error: "⚠️ API rate limit reached. Please try again later.",
+      },
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          headers: { "x-openclaw-token": "gateway-token" },
+          waitTimeoutMs: 2000,
+        }),
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("openclaw_gateway_wait_error");
+      expect(result.errorFamily).toBe("transient_upstream");
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("classifies session-lock contention wait errors as transient_upstream", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: {
+        runId: "run-123",
+        status: "error",
+        error:
+          "SessionWriteLockTimeoutError: session file locked (timeout 60000ms): path/to/session.jsonl",
+      },
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          headers: { "x-openclaw-token": "gateway-token" },
+          waitTimeoutMs: 2000,
+        }),
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("openclaw_gateway_wait_error");
+      expect(result.errorFamily).toBe("transient_upstream");
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("does not mark deterministic wait errors as transient", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: {
+        runId: "run-123",
+        status: "error",
+        error: "EmbeddedAttemptSessionTakeoverError: session file changed while embedded run active",
+      },
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          headers: { "x-openclaw-token": "gateway-token" },
+          waitTimeoutMs: 2000,
+        }),
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("openclaw_gateway_wait_error");
+      expect(result.errorFamily ?? null).toBeNull();
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("classifies an unreachable gateway (no run accepted) as transient_upstream", async () => {
+    // Nothing listens on the reserved port and reconnect budget is exhausted:
+    // the wake never reached the gateway, so an automatic retry is safe.
+    const port = await reserveFreePort();
+
+    const result = await execute(
+      buildContext({
+        url: `ws://127.0.0.1:${port}`,
+        headers: { "x-openclaw-token": "gateway-token" },
+        waitTimeoutMs: 2000,
+        connectMaxRetries: 1,
+      }),
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("openclaw_gateway_request_failed");
+    expect(result.errorFamily).toBe("transient_upstream");
+  }, 20_000);
 
   it("auto-approves pairing once and retries the run", async () => {
     const gateway = await createMockGatewayServerWithPairing();
