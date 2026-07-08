@@ -8214,6 +8214,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
   }
 
+  // Retry-storm circuit breaker (GEN-830): cap automatic recovery relaunches
+  // per issue inside a sliding window. The single-failure breaker
+  // (didAutomaticRecoveryFail) is defeated when retries alternate between
+  // success and failure, which produced 20+ relaunches in 15 minutes on
+  // 2026-07-08 and self-inflicted upstream rate limiting.
+  const ISSUE_RECOVERY_STORM_WINDOW_MS = 15 * 60 * 1000;
+  const ISSUE_RECOVERY_STORM_MAX_RETRIES = 3;
+
   function buildImmediateExecutionPathRecoveryComment(input: {
     status: "todo" | "in_progress";
     latestRun: Pick<typeof heartbeatRuns.$inferSelect, "error" | "errorCode"> | null | undefined;
@@ -8543,6 +8551,32 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           issue,
           previousStatus: issue.status,
           comment,
+        };
+      }
+
+      const stormWindowStart = new Date(Date.now() - ISSUE_RECOVERY_STORM_WINDOW_MS);
+      const recentRecoveryRuns = await tx
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, issue.companyId),
+            gt(heartbeatRuns.createdAt, stormWindowStart),
+            sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+            sql`${heartbeatRuns.contextSnapshot} ->> 'retryReason' in ('assignment_recovery', 'issue_continuation_needed')`,
+          ),
+        )
+        .limit(ISSUE_RECOVERY_STORM_MAX_RETRIES);
+      if (recentRecoveryRuns.length >= ISSUE_RECOVERY_STORM_MAX_RETRIES) {
+        return {
+          kind: "blocked" as const,
+          issue,
+          previousStatus: issue.status,
+          comment:
+            "Paperclip suppressed another automatic retry for this issue: " +
+            `${ISSUE_RECOVERY_STORM_MAX_RETRIES}+ automatic recovery runs were already launched within the last ` +
+            `${Math.round(ISSUE_RECOVERY_STORM_WINDOW_MS / 60_000)} minutes (retry storm). ` +
+            "Moving it to `blocked` so an owner can intervene instead of burning more runs.",
         };
       }
 
