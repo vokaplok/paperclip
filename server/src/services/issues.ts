@@ -78,6 +78,7 @@ import {
   RECOVERY_ORIGIN_KINDS,
 } from "./recovery/origins.js";
 import { classifyIssueGraphLiveness, type IssueLivenessFinding } from "./recovery/issue-graph-liveness.js";
+import { normalizeHeartbeatRunId } from "./heartbeat-run-id.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -4664,6 +4665,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
       await assertAssignableAgent(issueCompany.companyId, agentId);
+      checkoutRunId = normalizeHeartbeatRunId(checkoutRunId);
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issueCompany.companyId, id);
@@ -4809,6 +4811,7 @@ export function issueService(db: Db) {
     },
 
     assertCheckoutOwner: async (id: string, actorAgentId: string, actorRunId: string | null) => {
+      actorRunId = normalizeHeartbeatRunId(actorRunId);
       await clearExecutionRunIfTerminal(id);
       const current = await db
         .select({
@@ -5164,7 +5167,7 @@ export function issueService(db: Db) {
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
           authorType,
-          createdByRunId: actor.runId ?? null,
+          createdByRunId: normalizeHeartbeatRunId(actor.runId),
           body: redactedBody,
           presentation,
           metadata,
