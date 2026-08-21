@@ -50,7 +50,7 @@ import {
   isUuidLike,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
-import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { badRequest, conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
 import {
@@ -78,7 +78,6 @@ import {
   RECOVERY_ORIGIN_KINDS,
 } from "./recovery/origins.js";
 import { classifyIssueGraphLiveness, type IssueLivenessFinding } from "./recovery/issue-graph-liveness.js";
-import { normalizeHeartbeatRunId } from "./heartbeat-run-id.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -331,6 +330,38 @@ export type ChildIssueCompletionSummary = {
 function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   if (actorRunId) return checkoutRunId === actorRunId;
   return checkoutRunId == null;
+}
+
+const RUN_ID_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Validates an actor-provided run id before it can reach UUID/FK-backed columns
+ * (issues.checkout_run_id, issues.execution_run_id, activity_log.run_id, ...).
+ * Non-UUID values are rejected before any write query is built; UUID-shaped
+ * values must reference an existing heartbeat_runs row for the acting agent,
+ * otherwise persistence would fail with a database FK error (HTTP 500).
+ * Route-level validation (requireAgentRunId) covers HTTP callers; this guard
+ * protects remaining direct service callers (plugin scoped routes, plugin host
+ * services, MCP tools) from the same failure class.
+ */
+async function assertHeartbeatRunForAgent(db: Db, agentId: string, runId: string) {
+  if (!RUN_ID_UUID_PATTERN.test(runId)) {
+    throw badRequest("Invalid agent run id", {
+      reason: "Run id must be a UUID",
+      received: runId.slice(0, 64),
+    });
+  }
+  const run = await db
+    .select({ id: heartbeatRuns.id })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.agentId, agentId)))
+    .then((rows) => rows[0] ?? null);
+  if (!run) {
+    throw unprocessable("Agent run id does not reference a heartbeat run for this agent", {
+      runId,
+      agentId,
+    });
+  }
 }
 
 const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
@@ -4665,7 +4696,7 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issueCompany) throw notFound("Issue not found");
       await assertAssignableAgent(issueCompany.companyId, agentId);
-      checkoutRunId = normalizeHeartbeatRunId(checkoutRunId);
+      if (checkoutRunId) await assertHeartbeatRunForAgent(db, agentId, checkoutRunId);
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(issueCompany.companyId, id);
@@ -4811,7 +4842,7 @@ export function issueService(db: Db) {
     },
 
     assertCheckoutOwner: async (id: string, actorAgentId: string, actorRunId: string | null) => {
-      actorRunId = normalizeHeartbeatRunId(actorRunId);
+      if (actorRunId) await assertHeartbeatRunForAgent(db, actorAgentId, actorRunId);
       await clearExecutionRunIfTerminal(id);
       const current = await db
         .select({
@@ -5167,7 +5198,7 @@ export function issueService(db: Db) {
           authorAgentId: actor.agentId ?? null,
           authorUserId: actor.userId ?? null,
           authorType,
-          createdByRunId: normalizeHeartbeatRunId(actor.runId),
+          createdByRunId: actor.runId ?? null,
           body: redactedBody,
           presentation,
           metadata,
