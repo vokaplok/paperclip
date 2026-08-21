@@ -8,11 +8,13 @@ const companyId = "22222222-2222-4222-8222-222222222222";
 const ownerAgentId = "33333333-3333-4333-8333-333333333333";
 const peerAgentId = "44444444-4444-4444-8444-444444444444";
 const ownerRunId = "55555555-5555-4555-8555-555555555555";
+const peerRunId = "66666666-6666-4666-8666-666666666666";
 const recoveryActionId = "77777777-7777-4777-8777-777777777777";
 
 const mockIssueService = vi.hoisted(() => ({
   addComment: vi.fn(),
   assertCheckoutOwner: vi.fn(),
+  checkout: vi.fn(),
   create: vi.fn(),
   createChild: vi.fn(),
   getAttachmentById: vi.fn(),
@@ -233,18 +235,19 @@ function peerActor(overrides: Record<string, unknown> = {}) {
     agentId: peerAgentId,
     companyId,
     source: "agent_key",
-    runId: "66666666-6666-4666-8666-666666666666",
+    runId: peerRunId,
     ...overrides,
   };
 }
 
-function ownerActor() {
+function ownerActor(overrides: Record<string, unknown> = {}) {
   return {
     type: "agent",
     agentId: ownerAgentId,
     companyId,
     source: "agent_key",
     runId: ownerRunId,
+    ...overrides,
   };
 }
 
@@ -290,6 +293,7 @@ describe("agent issue mutation checkout ownership", () => {
     mockCompanyService.getById.mockReset();
     mockIssueService.addComment.mockReset();
     mockIssueService.assertCheckoutOwner.mockReset();
+    mockIssueService.checkout.mockReset();
     mockIssueService.create.mockReset();
     mockIssueService.createChild.mockReset();
     mockIssueService.getAttachmentById.mockReset();
@@ -335,7 +339,11 @@ describe("agent issue mutation checkout ownership", () => {
     mockHeartbeatService.reportRunActivity.mockReset();
     mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
     mockHeartbeatService.getRun.mockReset();
-    mockHeartbeatService.getRun.mockResolvedValue(null);
+    mockHeartbeatService.getRun.mockImplementation(async (runId: string) => {
+      if (runId === ownerRunId) return { id: ownerRunId, agentId: ownerAgentId, companyId };
+      if (runId === peerRunId) return { id: peerRunId, agentId: peerAgentId, companyId };
+      return null;
+    });
     mockHeartbeatService.getActiveRunForAgent.mockReset();
     mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
     mockHeartbeatService.cancelRun.mockReset();
@@ -369,6 +377,7 @@ describe("agent issue mutation checkout ownership", () => {
     mockIssueService.getById.mockResolvedValue(makeIssue());
     mockIssueService.getByIdentifier.mockResolvedValue(null);
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
+    mockIssueService.checkout.mockResolvedValue(makeIssue());
     mockIssueService.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
       ...makeIssue({
         id: "88888888-8888-4888-8888-888888888888",
@@ -504,6 +513,46 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockWorkProductService.update).not.toHaveBeenCalled();
     expect(mockStorageService.putFile).not.toHaveBeenCalled();
     expect(mockStorageService.deleteObject).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["checkout", (app: express.Express) => request(app).post(`/api/issues/${issueId}/checkout`).send({
+      agentId: ownerAgentId,
+      expectedStatuses: ["todo", "backlog", "blocked", "in_review"],
+    })],
+    ["mutation ownership", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Updated" })],
+  ])("rejects a non-UUID agent run id before persistence on %s", async (_name, sendRequest) => {
+    const app = await createApp(ownerActor({ runId: "not-a-uuid" }));
+
+    const res = await sendRequest(app);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toBe("Invalid agent run id");
+    expect(mockHeartbeatService.getRun).not.toHaveBeenCalled();
+    expect(mockIssueService.checkout).not.toHaveBeenCalled();
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["checkout", (app: express.Express) => request(app).post(`/api/issues/${issueId}/checkout`).send({
+      agentId: ownerAgentId,
+      expectedStatuses: ["todo", "backlog", "blocked", "in_review"],
+    })],
+    ["mutation ownership", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Updated" })],
+  ])("rejects an unknown UUID agent run id before persistence on %s", async (_name, sendRequest) => {
+    const unknownRunId = "99999999-9999-4999-8999-999999999999";
+    mockHeartbeatService.getRun.mockResolvedValueOnce(null);
+    const app = await createApp(ownerActor({ runId: unknownRunId }));
+
+    const res = await sendRequest(app);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toBe("Unknown agent run id");
+    expect(mockHeartbeatService.getRun).toHaveBeenCalledWith(unknownRunId);
+    expect(mockIssueService.checkout).not.toHaveBeenCalled();
+    expect(mockIssueService.assertCheckoutOwner).not.toHaveBeenCalled();
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
   it("allows the checked-out owner with the matching run id to patch and update documents", async () => {

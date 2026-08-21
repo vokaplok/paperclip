@@ -42,6 +42,7 @@ import {
   updateIssueSchema,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
+  isUuidLike,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
   type CompanySearchQuery,
   type CompanySearchResponse,
@@ -1290,12 +1291,28 @@ export function issueRoutes(
     throw forbidden(decision.explanation);
   }
 
-  function requireAgentRunId(req: Request, res: Response) {
+  async function requireAgentRunId(req: Request, res: Response) {
     if (req.actor.type !== "agent") return null;
     const runId = req.actor.runId?.trim();
-    if (runId) return runId;
-    res.status(401).json({ error: "Agent run id required" });
-    return null;
+    if (!runId) {
+      res.status(401).json({ error: "Agent run id required" });
+      return null;
+    }
+    if (!isUuidLike(runId)) {
+      res.status(400).json({ error: "Invalid agent run id" });
+      return null;
+    }
+
+    const run = await heartbeat.getRun(runId);
+    if (!run) {
+      res.status(400).json({ error: "Unknown agent run id" });
+      return null;
+    }
+    if (run.agentId !== req.actor.agentId || run.companyId !== req.actor.companyId) {
+      res.status(403).json({ error: "Agent run id does not belong to authenticated agent" });
+      return null;
+    }
+    return runId;
   }
 
   async function hasActiveCheckoutManagementOverride(
@@ -1317,6 +1334,8 @@ export function issueRoutes(
     issue: { id: string; companyId: string; status: string; assigneeAgentId: string | null },
   ) {
     if (req.actor.type !== "agent") return true;
+    const runId = await requireAgentRunId(req, res);
+    if (!runId) return false;
     const actorAgentId = req.actor.agentId;
     if (!actorAgentId) {
       res.status(403).json({ error: "Agent authentication required" });
@@ -1355,8 +1374,6 @@ export function issueRoutes(
     if (issue.status !== "in_progress") {
       return true;
     }
-    const runId = requireAgentRunId(req, res);
-    if (!runId) return false;
     const ownership = await svc.assertCheckoutOwner(issue.id, actorAgentId, runId);
     if (ownership.adoptedFromRunId) {
       const actor = getActorInfo(req);
@@ -4447,7 +4464,7 @@ export function issueRoutes(
       return;
     }
 
-    const checkoutRunId = requireAgentRunId(req, res);
+    const checkoutRunId = await requireAgentRunId(req, res);
     if (req.actor.type === "agent" && !checkoutRunId) return;
     const updated = await svc.checkout(id, req.body.agentId, req.body.expectedStatuses, checkoutRunId);
     const actor = getActorInfo(req);
@@ -4497,7 +4514,7 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, existing.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
-    const actorRunId = requireAgentRunId(req, res);
+    const actorRunId = await requireAgentRunId(req, res);
     if (req.actor.type === "agent" && !actorRunId) return;
 
     const released = await svc.release(
@@ -4642,7 +4659,7 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
-    const agentSourceRunId = req.actor.type === "agent" ? requireAgentRunId(req, res) : null;
+    const agentSourceRunId = req.actor.type === "agent" ? await requireAgentRunId(req, res) : null;
     if (req.actor.type === "agent" && !agentSourceRunId) return;
 
     const interaction = await issueThreadInteractionService(db).create(issue, {
