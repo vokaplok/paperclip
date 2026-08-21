@@ -9,6 +9,8 @@ const ownerAgentId = "33333333-3333-4333-8333-333333333333";
 const peerAgentId = "44444444-4444-4444-8444-444444444444";
 const ownerRunId = "55555555-5555-4555-8555-555555555555";
 const peerRunId = "66666666-6666-4666-8666-666666666666";
+const ownerExternalRunId = "subagent-55555555-5555-4555-8555-555555555555-1787306500";
+const peerExternalRunId = "subagent-66666666-6666-4666-8666-666666666666-1787306500";
 const recoveryActionId = "77777777-7777-4777-8777-777777777777";
 
 const mockActivityWrite = vi.hoisted(() => vi.fn(async () => undefined));
@@ -85,6 +87,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   wakeup: vi.fn(async () => undefined),
   reportRunActivity: vi.fn(async () => undefined),
   getRun: vi.fn(async () => null),
+  getRunByExternalRunId: vi.fn(async () => null),
   getActiveRunForAgent: vi.fn(async () => null),
   cancelRun: vi.fn(async () => null),
 }));
@@ -356,6 +359,12 @@ describe("agent issue mutation checkout ownership", () => {
       if (runId === peerRunId) return { id: peerRunId, agentId: peerAgentId, companyId };
       return null;
     });
+    mockHeartbeatService.getRunByExternalRunId.mockReset();
+    mockHeartbeatService.getRunByExternalRunId.mockImplementation(async (runId: string) => {
+      if (runId === ownerExternalRunId) return { id: ownerRunId, agentId: ownerAgentId, companyId };
+      if (runId === peerExternalRunId) return { id: peerRunId, agentId: peerAgentId, companyId };
+      return null;
+    });
     mockHeartbeatService.getActiveRunForAgent.mockReset();
     mockHeartbeatService.getActiveRunForAgent.mockResolvedValue(null);
     mockHeartbeatService.cancelRun.mockReset();
@@ -537,23 +546,42 @@ describe("agent issue mutation checkout ownership", () => {
     })],
     ["patch", (app: express.Express) => request(app).patch(`/api/issues/${issueId}`).send({ title: "Updated" })],
   ] as const;
+  it.each(mutationRequests)(
+    "resolves a mapped OpenClaw subagent run id to the canonical heartbeat UUID for %s",
+    async (_routeName, sendRequest) => {
+      const res = await sendRequest(await createApp(ownerActor({ runId: ownerExternalRunId })));
+
+      expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
+      expect(mockHeartbeatService.getRunByExternalRunId).toHaveBeenCalledWith(ownerExternalRunId);
+      expect(JSON.stringify([
+        ...mockIssueService.create.mock.calls,
+        ...mockIssueService.createChild.mock.calls,
+        ...mockIssueService.addComment.mock.calls,
+        ...mockIssueService.checkout.mock.calls,
+        ...mockIssueService.assertCheckoutOwner.mock.calls,
+        ...mockIssueService.update.mock.calls,
+      ])).not.toContain(ownerExternalRunId);
+    },
+  );
+
   const rejectedRunIds = [
-    ["opaque non-UUID", "not-a-uuid", "Invalid agent run id", false],
-    ["malformed UUID", `${ownerRunId}-extra`, "Invalid agent run id", false],
-    ["unknown UUID", "99999999-9999-4999-8999-999999999999", "Unknown agent run id", true],
+    ["unknown opaque id", "not-a-uuid", "Unknown agent run id", 400, true],
+    ["unknown subagent id", "subagent-99999999-9999-4999-8999-999999999999-1787306500", "Unknown agent run id", 400, true],
+    ["cross-agent subagent id", peerExternalRunId, "does not belong to authenticated agent", 403, true],
+    ["unknown UUID", "99999999-9999-4999-8999-999999999999", "Unknown agent run id", 400, false],
   ] as const;
 
   it.each(mutationRequests.flatMap(([routeName, sendRequest]) =>
-    rejectedRunIds.map(([runKind, runId, expectedError, expectsLookup]) =>
-      [routeName, runKind, sendRequest, runId, expectedError, expectsLookup] as const))) (
+    rejectedRunIds.map(([runKind, runId, expectedError, expectedStatus, expectsExternalLookup]) =>
+      [routeName, runKind, sendRequest, runId, expectedError, expectedStatus, expectsExternalLookup] as const))) (
     "rejects %s with an %s before persistence",
-    async (_routeName, _runKind, sendRequest, runId, expectedError, expectsLookup) => {
+    async (_routeName, _runKind, sendRequest, runId, expectedError, expectedStatus, expectsExternalLookup) => {
       const res = await sendRequest(await createApp(ownerActor({ runId })));
 
-      expect(res.status, JSON.stringify(res.body)).toBe(400);
-      expect(res.body.error).toBe(expectedError);
-      if (expectsLookup) expect(mockHeartbeatService.getRun).toHaveBeenCalledWith(runId);
-      else expect(mockHeartbeatService.getRun).not.toHaveBeenCalled();
+      expect(res.status, JSON.stringify(res.body)).toBe(expectedStatus);
+      expect(res.body.error).toContain(expectedError);
+      if (expectsExternalLookup) expect(mockHeartbeatService.getRunByExternalRunId).toHaveBeenCalledWith(runId);
+      else expect(mockHeartbeatService.getRun).toHaveBeenCalledWith(runId);
       expect(mockIssueService.create).not.toHaveBeenCalled();
       expect(mockIssueService.createChild).not.toHaveBeenCalled();
       expect(mockIssueService.addComment).not.toHaveBeenCalled();

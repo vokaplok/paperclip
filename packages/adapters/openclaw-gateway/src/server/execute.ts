@@ -1363,6 +1363,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
       trackedRunIds.add(acceptedRunId);
 
+      if (acceptedRunId !== ctx.runId) {
+        await ctx.onExternalRunId?.(acceptedRunId);
+      }
+
       await ctx.onLog(
         "stdout",
         `[openclaw-gateway] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}\n`,

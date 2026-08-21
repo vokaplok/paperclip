@@ -1300,12 +1300,9 @@ export function issueRoutes(
       }
       return true;
     }
-    if (!isUuidLike(runId)) {
-      res.status(400).json({ error: "Invalid agent run id" });
-      return false;
-    }
-
-    const run = await heartbeat.getRun(runId);
+    const run = isUuidLike(runId)
+      ? await heartbeat.getRun(runId)
+      : await heartbeat.getRunByExternalRunId(runId);
     if (!run) {
       res.status(400).json({ error: "Unknown agent run id" });
       return false;
@@ -1317,7 +1314,8 @@ export function issueRoutes(
       res.status(403).json({ error: "Agent run id does not belong to authenticated agent" });
       return false;
     }
-    res.locals.paperclipRunId = runId;
+    res.locals.paperclipRunId = run.id;
+    if (req.actor.type === "agent") req.actor.runId = run.id;
     return true;
   }
 

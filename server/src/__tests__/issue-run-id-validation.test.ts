@@ -265,7 +265,7 @@ describeEmbeddedPostgres("agent run id validation before write persistence", () 
   });
 });
 
-describe("auth middleware run id header gate", () => {
+describe("auth middleware run id header forwarding", () => {
   function buildApp() {
     const app = express();
     app.use(actorMiddleware({} as never, { deploymentMode: "local_trusted" } as never));
@@ -275,19 +275,18 @@ describe("auth middleware run id header gate", () => {
     return app;
   }
 
-  it("rejects a non-UUID X-Paperclip-Run-Id with 400 before any handler runs", async () => {
+  it("allows an opaque run id on reads so mutation routes can resolve registered external ids", async () => {
     const res = await request(buildApp())
       .get("/api/ping")
       .set("x-paperclip-run-id", INVALID_RUN_ID);
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Invalid X-Paperclip-Run-Id header");
+    expect(res.status).toBe(200);
   });
 
-  it("rejects a UUID-prefixed-but-malformed run id with 400", async () => {
+  it("does not globally reject malformed run ids on read-only requests", async () => {
     const res = await request(buildApp())
       .get("/api/ping")
       .set("x-paperclip-run-id", "82cf0590-9282-40bf-aab2-fdd4888068ed-extra");
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
   });
 
   it("accepts a well-formed UUID run id header", async () => {

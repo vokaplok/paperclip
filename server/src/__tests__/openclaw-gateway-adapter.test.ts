@@ -41,6 +41,7 @@ function buildContext(
 
 async function createMockGatewayServer(options?: {
   waitPayload?: Record<string, unknown>;
+  acceptedRunId?: string;
   port?: number;
   deferListen?: boolean;
 }) {
@@ -90,10 +91,10 @@ async function createMockGatewayServer(options?: {
 
       if (frame.method === "agent") {
         agentPayload = frame.params ?? null;
-        const runId =
-          typeof frame.params?.idempotencyKey === "string"
+        const runId = options?.acceptedRunId ??
+          (typeof frame.params?.idempotencyKey === "string"
             ? frame.params.idempotencyKey
-            : "run-123";
+            : "run-123");
 
         socket.send(
           JSON.stringify({
@@ -417,6 +418,29 @@ describe("openclaw gateway ui stdout parser", () => {
 });
 
 describe("openclaw gateway adapter execute", () => {
+  it("registers the OpenClaw-assigned run id before waiting for completion", async () => {
+    const externalRunId = "subagent-55555555-5555-4555-8555-555555555555-1787306500";
+    const gateway = await createMockGatewayServer({ acceptedRunId: externalRunId });
+    const registered: string[] = [];
+
+    try {
+      const result = await execute(buildContext({
+        url: gateway.url,
+        headers: { "x-openclaw-token": "gateway-token" },
+        waitTimeoutMs: 2000,
+      }, {
+        onExternalRunId: async (runId) => {
+          registered.push(runId);
+        },
+      }));
+
+      expect(result.exitCode).toBe(0);
+      expect(registered).toEqual([externalRunId]);
+    } finally {
+      await gateway.close();
+    }
+  });
+
   it("runs connect -> agent -> agent.wait and forwards wake payload", async () => {
     const gateway = await createMockGatewayServer();
     const logs: string[] = [];

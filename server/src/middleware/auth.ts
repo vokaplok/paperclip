@@ -4,7 +4,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentApiKeys, agents, authUsers, companies, companyMemberships, instanceUserRoles } from "@paperclipai/db";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
-import { isUuidLike, type DeploymentMode } from "@paperclipai/shared";
+import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
@@ -20,7 +20,7 @@ interface ActorMiddlewareOptions {
 
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
-  return async (req, res, next) => {
+  return async (req, _res, next) => {
     req.actor =
       opts.deploymentMode === "local_trusted"
         ? {
@@ -34,16 +34,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         : { type: "none", source: "none" };
 
     const runIdHeader = req.header("x-paperclip-run-id");
-    if (runIdHeader && !isUuidLike(runIdHeader)) {
-      res.status(400).json({
-        error: "Invalid X-Paperclip-Run-Id header",
-        details: {
-          reason: "Run id must be a UUID",
-          received: runIdHeader.trim().slice(0, 64),
-        },
-      });
-      return;
-    }
 
     const authHeader = req.header("authorization");
     if (!authHeader?.toLowerCase().startsWith("bearer ")) {

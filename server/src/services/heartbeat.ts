@@ -2466,6 +2466,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
   }
 
+  async function getRunByExternalRunId(externalRunId: string) {
+    const rows = await db
+      .select(heartbeatRunSafeColumns)
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.externalRunId, externalRunId))
+      .limit(2);
+    return rows.length === 1 ? rows[0] : null;
+  }
+
   async function getRunLogAccess(runId: string) {
     return db
       .select(heartbeatRunLogAccessColumns)
@@ -7794,6 +7803,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           : undefined,
         onLog,
         onMeta: onAdapterMeta,
+        onExternalRunId: async (externalRunId) => {
+          const normalizedExternalRunId = readNonEmptyString(externalRunId);
+          if (!normalizedExternalRunId || normalizedExternalRunId === run.id) return;
+
+          const conflictingRun = await db
+            .select({ id: heartbeatRuns.id })
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.externalRunId, normalizedExternalRunId))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (conflictingRun && conflictingRun.id !== run.id) {
+            throw new Error(`External adapter run id is already registered to another heartbeat run`);
+          }
+
+          await db
+            .update(heartbeatRuns)
+            .set({ externalRunId: normalizedExternalRunId, updatedAt: new Date() })
+            .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.agentId, agent.id)));
+        },
         onSpawn: async (meta) => {
           await persistRunProcessMetadata(run.id, {
             pid: meta.pid,
@@ -9720,6 +9748,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     },
 
     getRun,
+
+    getRunByExternalRunId,
 
     getRunLogAccess,
 
