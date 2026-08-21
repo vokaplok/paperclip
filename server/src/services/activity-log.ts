@@ -63,24 +63,41 @@ export interface LogActivityInput {
 }
 
 export async function logActivity(db: Db, input: LogActivityInput) {
-  const currentUserRedactionOptions = {
-    enabled: (await instanceSettingsService(db).getGeneral()).censorUsernameInLogs,
-  };
-  const sanitizedDetails = input.details ? sanitizeRecord(input.details) : null;
-  const redactedDetails = sanitizedDetails
-    ? redactCurrentUserValue(sanitizedDetails, currentUserRedactionOptions)
-    : null;
-  await db.insert(activityLog).values({
-    companyId: input.companyId,
-    actorType: input.actorType,
-    actorId: input.actorId,
-    action: input.action,
-    entityType: input.entityType,
-    entityId: input.entityId,
-    agentId: input.agentId ?? null,
-    runId: input.runId ?? null,
-    details: redactedDetails,
-  });
+  let redactedDetails: Record<string, unknown> | null = null;
+  try {
+    const currentUserRedactionOptions = {
+      enabled: (await instanceSettingsService(db).getGeneral()).censorUsernameInLogs,
+    };
+    const sanitizedDetails = input.details ? sanitizeRecord(input.details) : null;
+    redactedDetails = sanitizedDetails
+      ? redactCurrentUserValue(sanitizedDetails, currentUserRedactionOptions)
+      : null;
+    await db.insert(activityLog).values({
+      companyId: input.companyId,
+      actorType: input.actorType,
+      actorId: input.actorId,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      agentId: input.agentId ?? null,
+      runId: input.runId ?? null,
+      details: redactedDetails,
+    });
+  } catch (err) {
+    logger.warn(
+      {
+        err,
+        companyId: input.companyId,
+        action: input.action,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        agentId: input.agentId ?? null,
+        runId: input.runId ?? null,
+      },
+      "failed to persist non-critical activity log",
+    );
+    return;
+  }
 
   publishLiveEvent({
     companyId: input.companyId,

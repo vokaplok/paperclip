@@ -332,8 +332,6 @@ function sameRunLock(checkoutRunId: string | null, actorRunId: string | null) {
   return checkoutRunId == null;
 }
 
-const RUN_ID_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * Validates an actor-provided run id before it can reach UUID/FK-backed columns
  * (issues.checkout_run_id, issues.execution_run_id, activity_log.run_id, ...).
@@ -345,7 +343,7 @@ const RUN_ID_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
  * services, MCP tools) from the same failure class.
  */
 async function assertHeartbeatRunForAgent(db: Db, agentId: string, runId: string) {
-  if (!RUN_ID_UUID_PATTERN.test(runId)) {
+  if (!isUuidLike(runId)) {
     throw badRequest("Invalid agent run id", {
       reason: "Run id must be a UUID",
       received: runId.slice(0, 64),
