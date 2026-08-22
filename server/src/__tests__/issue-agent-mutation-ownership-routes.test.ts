@@ -9,8 +9,8 @@ const ownerAgentId = "33333333-3333-4333-8333-333333333333";
 const peerAgentId = "44444444-4444-4444-8444-444444444444";
 const ownerRunId = "55555555-5555-4555-8555-555555555555";
 const peerRunId = "66666666-6666-4666-8666-666666666666";
-const ownerExternalRunId = "subagent-55555555-5555-4555-8555-555555555555-1787306500";
-const peerExternalRunId = "subagent-66666666-6666-4666-8666-666666666666-1787306500";
+const ownerExternalRunId = "subagent-b6f1ebfd-1787302380";
+const peerExternalRunId = "subagent-188ad4d3-1787302380";
 const recoveryActionId = "77777777-7777-4777-8777-777777777777";
 
 const mockActivityWrite = vi.hoisted(() => vi.fn(async () => undefined));
@@ -569,7 +569,7 @@ describe("agent issue mutation checkout ownership", () => {
 
   const rejectedRunIds = [
     ["unknown opaque id", "not-a-uuid", "Unknown agent run id", 400, true],
-    ["unknown subagent id", "subagent-99999999-9999-4999-8999-999999999999-1787306500", "Unknown agent run id", 400, true],
+    ["unknown subagent id", "subagent-deadbeef-1787302380", "Unknown agent run id", 400, true],
     ["cross-agent subagent id", peerExternalRunId, "does not belong to authenticated agent", 403, true],
     ["unknown UUID", "99999999-9999-4999-8999-999999999999", "Unknown agent run id", 400, false],
   ] as const;

@@ -419,7 +419,7 @@ describe("openclaw gateway ui stdout parser", () => {
 
 describe("openclaw gateway adapter execute", () => {
   it("registers the OpenClaw-assigned run id before waiting for completion", async () => {
-    const externalRunId = "subagent-55555555-5555-4555-8555-555555555555-1787306500";
+    const externalRunId = "subagent-b6f1ebfd-1787302380";
     const gateway = await createMockGatewayServer({ acceptedRunId: externalRunId });
     const registered: string[] = [];
 
