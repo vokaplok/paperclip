@@ -132,6 +132,19 @@ function nonEmpty(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+export function reconcileAgentWaitStatus(payload: Record<string, unknown>): string {
+  const status = nonEmpty(payload.status)?.toLowerCase() ?? "";
+
+  // OpenClaw can expose a completed lifecycle reason through the legacy
+  // error-shaped wait payload. Reconcile only that exact terminal fingerprint;
+  // every other error remains a failure and must not trigger another execution.
+  if (status === "error" && nonEmpty(payload.error)?.toLowerCase() === "completed") {
+    return "ok";
+  }
+
+  return status;
+}
+
 function parseOptionalPositiveInteger(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.max(1, Math.floor(value));
@@ -1395,7 +1408,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
         latestResultPayload = waitPayload;
 
-        const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+        const rawWaitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+        const waitStatus = reconcileAgentWaitStatus(waitPayload);
+        if (rawWaitStatus !== waitStatus) {
+          await ctx.onLog(
+            "stdout",
+            `[openclaw-gateway] reconciled agent.wait runId=${acceptedRunId} status=${rawWaitStatus} error=${nonEmpty(waitPayload.error) ?? "unknown"} as status=${waitStatus}\n`,
+          );
+        }
+
         if (waitStatus === "timeout") {
           return {
             exitCode: 1,

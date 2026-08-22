@@ -1,5 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { resolveSessionKey } from "./execute.js";
+import { reconcileAgentWaitStatus, resolveSessionKey } from "./execute.js";
+
+describe("reconcileAgentWaitStatus", () => {
+  it("treats OpenClaw's observed error/completed wait payload as successful", () => {
+    expect(
+      reconcileAgentWaitStatus({
+        runId: "run-123",
+        status: "error",
+        error: "completed",
+      }),
+    ).toBe("ok");
+  });
+
+  it("normalizes completion reason casing and whitespace", () => {
+    expect(reconcileAgentWaitStatus({ status: "ERROR", error: " Completed " })).toBe("ok");
+  });
+
+  it("preserves genuine wait errors", () => {
+    expect(
+      reconcileAgentWaitStatus({
+        status: "error",
+        error: "Transcript compaction timed out",
+      }),
+    ).toBe("error");
+  });
+
+  it("does not infer success from completed text on a timeout", () => {
+    expect(reconcileAgentWaitStatus({ status: "timeout", error: "completed" })).toBe(
+      "timeout",
+    );
+  });
+});
 
 describe("resolveSessionKey", () => {
   it("prefixes run-scoped session keys with the configured agent", () => {
