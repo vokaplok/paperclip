@@ -553,14 +553,17 @@ describe("agent issue mutation checkout ownership", () => {
 
       expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
       expect(mockHeartbeatService.getRunByExternalRunId).toHaveBeenCalledWith(ownerExternalRunId);
-      expect(JSON.stringify([
+      const serializedWriteCalls = JSON.stringify([
         ...mockIssueService.create.mock.calls,
         ...mockIssueService.createChild.mock.calls,
         ...mockIssueService.addComment.mock.calls,
         ...mockIssueService.checkout.mock.calls,
         ...mockIssueService.assertCheckoutOwner.mock.calls,
         ...mockIssueService.update.mock.calls,
-      ])).not.toContain(ownerExternalRunId);
+        ...mockLogActivity.mock.calls,
+      ]);
+      expect(serializedWriteCalls).toContain(ownerRunId);
+      expect(serializedWriteCalls).not.toContain(ownerExternalRunId);
     },
   );
 
