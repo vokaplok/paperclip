@@ -1307,6 +1307,7 @@ export function routineService(
           reason: "issue_assigned",
           mutation: "create",
           contextSource: "routine.dispatch",
+          triggerPayload,
           requestedByActorType: input.source === "schedule" ? "system" : undefined,
           rethrowOnError: true,
         });

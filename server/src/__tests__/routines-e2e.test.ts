@@ -352,13 +352,19 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
 
     expect([200, 201], JSON.stringify(createRes.body)).toContain(createRes.status);
 
+    const triggerPayload = {
+      verificationOnly: true,
+      instruction: "Verify execution context only; do not perform routine side effects.",
+    };
     const runRes = await postRoutineRun(app, createRes.body.id, {
       source: "manual",
+      payload: triggerPayload,
       variables: { repo: "paperclip" },
     });
 
     expect(runRes.status).toBe(202);
     expect(runRes.body.triggerPayload).toEqual({
+      ...triggerPayload,
       variables: {
         repo: "paperclip",
         priority: "high",
@@ -366,11 +372,28 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
     });
 
     const [issue] = await db
-      .select({ description: issues.description })
+      .select({
+        description: issues.description,
+        executionRunId: issues.executionRunId,
+      })
       .from(issues)
       .where(eq(issues.id, runRes.body.linkedIssueId));
 
     expect(issue?.description).toBe("Review paperclip for high bugs");
+    const [executionRun] = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, issue!.executionRunId!));
+    expect(executionRun?.contextSnapshot).toMatchObject({
+      issueId: runRes.body.linkedIssueId,
+      triggerPayload: {
+        ...triggerPayload,
+        variables: {
+          repo: "paperclip",
+          priority: "high",
+        },
+      },
+    });
   });
 
   it("allows drafting a routine without defaults and running it with one-off overrides", async () => {

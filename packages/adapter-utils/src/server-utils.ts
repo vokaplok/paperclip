@@ -393,6 +393,7 @@ type PaperclipWakePayload = {
   livenessContinuation: PaperclipWakeLivenessContinuation | null;
   interactionKind: string | null;
   interactionStatus: string | null;
+  triggerPayload: Record<string, unknown> | null;
   childIssueSummaries: PaperclipWakeChildIssueSummary[];
   childIssueSummaryTruncated: boolean;
   commentIds: string[];
@@ -586,6 +587,10 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     : [];
 
   const activeTreeHold = normalizePaperclipWakeTreeHoldSummary(payload.activeTreeHold);
+  const triggerPayloadCandidate = parseObject(payload.triggerPayload);
+  const triggerPayload = Object.keys(triggerPayloadCandidate).length > 0
+    ? triggerPayloadCandidate
+    : null;
   if (comments.length === 0 && commentIds.length === 0 && childIssueSummaries.length === 0 && unresolvedBlockerIssueIds.length === 0 && unresolvedBlockerSummaries.length === 0 && !activeTreeHold && !executionStage && !continuationSummary && !livenessContinuation && !normalizePaperclipWakeIssue(payload.issue)) {
     return null;
   }
@@ -604,6 +609,7 @@ export function normalizePaperclipWakePayload(value: unknown): PaperclipWakePayl
     livenessContinuation,
     interactionKind: asString(payload.interactionKind, "").trim() || null,
     interactionStatus: asString(payload.interactionStatus, "").trim() || null,
+    triggerPayload,
     childIssueSummaries,
     childIssueSummaryTruncated: asBoolean(payload.childIssueSummaryTruncated, false),
     commentIds,
@@ -734,6 +740,16 @@ export function renderPaperclipWakePrompt(
   }
   if (normalized.missingCount > 0) {
     lines.push(`- omitted comments: ${normalized.missingCount}`);
+  }
+
+  if (normalized.triggerPayload) {
+    lines.push(
+      "",
+      "Routine trigger payload:",
+      "```json",
+      JSON.stringify(normalized.triggerPayload, null, 2),
+      "```",
+    );
   }
 
   if (executionStage) {

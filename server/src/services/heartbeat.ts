@@ -1963,6 +1963,10 @@ async function buildPaperclipWakePayload(input: {
     | null;
 }) {
   const executionStage = parseObject(input.contextSnapshot.executionStage);
+  const triggerPayloadCandidate = parseObject(input.contextSnapshot.triggerPayload);
+  const triggerPayload = Object.keys(triggerPayloadCandidate).length > 0
+    ? triggerPayloadCandidate
+    : null;
   const commentIds = extractWakeCommentIds(input.contextSnapshot);
   const issueId = readNonEmptyString(input.contextSnapshot.issueId);
   const continuationSummary = input.continuationSummary ?? null;
@@ -2085,6 +2089,7 @@ async function buildPaperclipWakePayload(input: {
       : null,
     interactionKind: readNonEmptyString(input.contextSnapshot.interactionKind),
     interactionStatus: readNonEmptyString(input.contextSnapshot.interactionStatus),
+    triggerPayload,
     checkedOutByHarness: input.contextSnapshot[PAPERCLIP_HARNESS_CHECKOUT_KEY] === true,
     dependencyBlockedInteraction: input.contextSnapshot.dependencyBlockedInteraction === true,
     treeHoldInteraction: input.contextSnapshot.treeHoldInteraction === true,

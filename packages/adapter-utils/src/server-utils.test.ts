@@ -437,6 +437,37 @@ describe("renderPaperclipWakePrompt", () => {
     );
   });
 
+  it("preserves a routine trigger payload in the serialized wake context", () => {
+    const triggerPayload = {
+      verificationOnly: true,
+      instruction: "Verify execution context only; do not perform routine side effects.",
+    };
+    const payload = {
+      reason: "issue_assigned",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-1580",
+        title: "Verify routine context",
+        status: "in_progress",
+      },
+      triggerPayload,
+      commentWindow: {
+        requestedCount: 0,
+        includedCount: 0,
+        missingCount: 0,
+      },
+      comments: [],
+      fallbackFetchNeeded: false,
+    };
+
+    expect(JSON.parse(stringifyPaperclipWakePayload(payload) ?? "{}")).toMatchObject({
+      triggerPayload,
+    });
+    expect(renderPaperclipWakePrompt(payload)).toContain(
+      '"verificationOnly": true',
+    );
+  });
+
   it("adds the execution contract to scoped wake prompts", () => {
     const prompt = renderPaperclipWakePrompt({
       reason: "issue_assigned",

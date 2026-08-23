@@ -575,8 +575,12 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
   it("wakes the assignee when a routine creates a fresh execution issue", async () => {
     const { agentId, routine, svc, wakeups } = await seedFixture();
+    const triggerPayload = {
+      verificationOnly: true,
+      instruction: "Verify execution context only; do not perform routine side effects.",
+    };
 
-    const run = await svc.runRoutine(routine.id, { source: "manual" });
+    const run = await svc.runRoutine(routine.id, { source: "manual", payload: triggerPayload });
 
     expect(run.status).toBe("issue_created");
     expect(run.linkedIssueId).toBeTruthy();
@@ -590,7 +594,11 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           payload: { issueId: run.linkedIssueId, mutation: "create" },
           requestedByActorType: undefined,
           requestedByActorId: null,
-          contextSnapshot: { issueId: run.linkedIssueId, source: "routine.dispatch" },
+          contextSnapshot: {
+            issueId: run.linkedIssueId,
+            source: "routine.dispatch",
+            triggerPayload,
+          },
         },
       },
     ]);
