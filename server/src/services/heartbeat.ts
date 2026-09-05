@@ -4981,18 +4981,28 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     }
 
+    // See the matching comment in evaluateQueuedRunStaleness: this used to be
+    // scoped to max-turn continuations only, which let other scheduled-retry
+    // kinds (transient-failure, missing-issue-comment, process-loss, ...)
+    // become due and start even after a different run had already taken over
+    // the issue's execution lock, racing on the identical OpenClaw session.
+    // Only a concrete (non-null) mismatch counts — see the matching comment in
+    // evaluateQueuedRunStaleness for why a null lock must not be treated as
+    // "someone else holds it."
     if (
-      retryReason === MAX_TURN_CONTINUATION_RETRY_REASON &&
+      Boolean(retryReason) &&
       input.enforceIssueExecutionLock &&
+      issue.executionRunId &&
       issue.executionRunId !== run.id
     ) {
       return {
         allowed: false,
-        reason: "Scheduled max-turn continuation suppressed because the issue execution lock belongs to a different run",
+        reason: "Scheduled retry suppressed because the issue execution lock belongs to a different run",
         errorCode: "issue_execution_lock_changed",
         issueId,
         details: {
           issueId,
+          retryReason,
           expectedExecutionRunId: run.id,
           currentExecutionRunId: issue.executionRunId,
         },
@@ -5166,7 +5176,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       agent,
       contextSnapshot,
       retryReason: dueRun.scheduledRetryReason,
-      enforceIssueExecutionLock: dueRun.scheduledRetryReason === MAX_TURN_CONTINUATION_RETRY_REASON,
+      // Every scheduled_retry row is itself a retry, so its lock ownership is
+      // always worth re-checking before promotion — not just for max-turn
+      // continuations (see evaluateScheduledRetryGate).
+      enforceIssueExecutionLock: Boolean(dueRun.scheduledRetryReason),
     });
     if (!gate.allowed) {
       if (
@@ -6194,7 +6207,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     }
 
-    if ((issue.status === "done" || issue.status === "cancelled") && !resumeIntent) {
+    // A mention wake never takes issue ownership or execution (see
+    // shouldAutoCheckoutIssueForWake and the promoted-run issue update above, which
+    // only touches executionRunId when the deferred agent is the assignee), so it stays
+    // a safe, purely informational delivery even after the issue reaches a terminal
+    // status. Only wakes that could act as the issue's owner (plain comments, resumes)
+    // are cancelled here.
+    const isMentionOnlyWake = wakeReason === "issue_comment_mentioned";
+
+    if ((issue.status === "done" || issue.status === "cancelled") && !resumeIntent && !isMentionOnlyWake) {
       return {
         stale: true,
         errorCode: "issue_terminal_status",
@@ -6212,14 +6233,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     }
 
-    if (retryReason === MAX_TURN_CONTINUATION_RETRY_REASON && issue.executionRunId !== run.id) {
+    // Any run created as an automatic retry of a prior run (max-turn
+    // continuation, transient-failure retry, missing-issue-comment retry,
+    // process-loss retry, etc.) is only safe to start if it still owns the
+    // issue's execution lock. Retry-scheduling transfers that lock to the new
+    // run's id at creation time (see scheduleBoundedRetryForRun); if something
+    // else has since taken the lock (e.g. a promoted deferred wake), starting
+    // this run anyway would execute concurrently against the identical
+    // (issueId+agentId scoped) OpenClaw session as whichever run currently
+    // holds it. This check used to be scoped to max-turn continuations only,
+    // which left other retry kinds able to race a live run on the same session.
+    //
+    // Only flag a *concrete* mismatch (issue.executionRunId set to a different,
+    // real run id) as stale — not a null lock. context.retryReason is also set
+    // by stranded-issue recovery (enqueueStrandedIssueRecovery, e.g.
+    // "assignment_recovery" / "issue_continuation_needed"), which goes through
+    // the ordinary enqueueWakeup creation path: that path explicitly nulls a
+    // dead issue.executionRunId before creating the fresh queued row and only
+    // re-acquires the lock later via claimQueuedRun's own CAS. Treating a null
+    // lock as "someone else has it" would falsely cancel that legitimate
+    // recovery run before it ever gets a chance to claim the lock itself.
+    if (retryReason && issue.executionRunId && issue.executionRunId !== run.id) {
       return {
         stale: true,
         errorCode: "issue_execution_lock_changed",
         reason:
-          "Cancelled because max-turn continuation no longer owns the issue execution lock before the queued run could start",
+          "Cancelled because this retry no longer owns the issue execution lock before the queued run could start",
         details: {
           issueId,
+          retryReason,
           expectedExecutionRunId: run.id,
           currentExecutionRunId: issue.executionRunId,
         },

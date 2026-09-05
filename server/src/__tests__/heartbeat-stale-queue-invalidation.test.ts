@@ -571,6 +571,102 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
+  it("cancels a queued transient-failure retry when another run already owns the issue execution lock", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ maxConcurrentRuns: 2 });
+    const issueId = randomUUID();
+    const lockOwnerRunId = randomUUID();
+
+    await db.insert(heartbeatRuns).values({
+      id: lockOwnerRunId,
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "scheduled_retry",
+      scheduledRetryReason: "transient_failure",
+      scheduledRetryAttempt: 1,
+      scheduledRetryAt: new Date("2026-04-20T12:00:00.000Z"),
+      contextSnapshot: {
+        issueId,
+        wakeReason: "transient_failure_retry",
+        retryReason: "transient_failure",
+      },
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Concurrent embedded attempt",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId: agentId,
+      // The lock currently belongs to a different in-flight run (lockOwnerRunId),
+      // not the queued retry we are about to try to start.
+      executionRunId: lockOwnerRunId,
+      executionAgentNameKey: "claudecoder",
+      executionLockedAt: new Date("2026-04-20T11:59:00.000Z"),
+    });
+
+    // A second, independent transient-failure retry for the SAME issue+agent.
+    // Nothing about this run's own row is stale by the assignee/terminal-status/
+    // in_review checks, so before the fix nothing stopped it from executing
+    // concurrently with lockOwnerRunId against the identical (issueId+agentId)
+    // OpenClaw session key.
+    const { runId, wakeupRequestId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      wakeReason: "transient_failure_retry",
+      invocationSource: "automation",
+      scheduledRetryReason: "transient_failure",
+      contextExtras: {
+        retryReason: "transient_failure",
+        retryOfRunId: lockOwnerRunId,
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run != null && run.status !== "queued" && run.status !== "running";
+    });
+
+    const [run, wakeup, issue] = await Promise.all([
+      db
+        .select({
+          status: heartbeatRuns.status,
+          errorCode: heartbeatRuns.errorCode,
+          resultJson: heartbeatRuns.resultJson,
+        })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ status: agentWakeupRequests.status, error: agentWakeupRequests.error })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ executionRunId: issues.executionRunId })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null),
+    ]);
+
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_execution_lock_changed");
+    expect(run?.resultJson).toMatchObject({ stopReason: "issue_execution_lock_changed" });
+    expect(wakeup?.status).toBe("skipped");
+    expect(wakeup?.error).toContain("execution lock");
+    expect(issue?.executionRunId).toBe(lockOwnerRunId);
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
   it("cancels queued in_review runs when the current participant changes before the run starts", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const otherAgentId = randomUUID();
