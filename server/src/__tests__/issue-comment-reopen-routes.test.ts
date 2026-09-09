@@ -497,6 +497,27 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
+  it.each(["done", "cancelled"] as const)(
+    "keeps a delayed machine-generated A2A handoff inert on %s issues",
+    async (status) => {
+      mockIssueService.getById.mockResolvedValue(makeIssue(status));
+
+      const res = await request(await installActor(createApp()))
+        .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+        .send({
+          body: [
+            "**🤖 A2A** — Ops Engineer sent message to Ops Engineer",
+            "",
+            "> Parent run already finalized this issue. Do not make further Paperclip mutations.",
+          ].join("\n"),
+        });
+
+      expect(res.status).toBe(201);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    },
+  );
+
   it("rejects non-assignee agent POST comments on closed issues", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
     mockIssueService.addComment.mockResolvedValue({
