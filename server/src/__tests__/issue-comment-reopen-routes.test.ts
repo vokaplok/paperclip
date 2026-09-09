@@ -498,18 +498,19 @@ describe.sequential("issue comment reopen routes", () => {
   });
 
   it.each(["done", "cancelled"] as const)(
-    "keeps a delayed machine-generated A2A handoff inert on %s issues",
-    async (status) => {
-      mockIssueService.getById.mockResolvedValue(makeIssue(status));
+    "keeps a delayed machine-generated A2A stop handoff inert after parent completion (%s)",
+    async (terminalStatus) => {
+      mockIssueService.getById.mockResolvedValue(makeIssue(terminalStatus));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue(terminalStatus),
+        ...patch,
+      }));
 
       const res = await request(await installActor(createApp()))
         .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
         .send({
-          body: [
-            "**🤖 A2A** — Ops Engineer sent message to Ops Engineer",
-            "",
-            "> Parent run already finalized this issue. Do not make further Paperclip mutations.",
-          ].join("\n"),
+          body: "**🤖 A2A** — Ops Engineer sent message to Ops Engineer\n\n> Parent is done. Stop and return evidence only.",
+          reopen: true,
         });
 
       expect(res.status).toBe(201);
@@ -517,6 +518,57 @@ describe.sequential("issue comment reopen routes", () => {
       expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
     },
   );
+
+  it("preserves a human explicit reopen request", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("done"),
+      ...patch,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Please reopen this issue.", reopen: true });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      { status: "todo" },
+    );
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+    );
+  });
+
+  it("allows an explicit resume on a machine-generated A2A comment", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("done"),
+      ...patch,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({
+        body: "**🤖 A2A** — Ops Engineer sent message to Ops Engineer\n\n> Resume this completed issue.",
+        reopen: true,
+        resume: true,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      { status: "todo" },
+    );
+    expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        reason: "issue_reopened_via_comment",
+        payload: expect.objectContaining({ resumeIntent: true, followUpRequested: true }),
+      }),
+    );
+  });
 
   it("rejects non-assignee agent POST comments on closed issues", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));

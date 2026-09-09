@@ -614,6 +614,23 @@ function isClosedIssueStatus(status: string | null | undefined): status is "done
   return status === "done" || status === "cancelled";
 }
 
+function isMachineGeneratedA2AComment(body: unknown): boolean {
+  return typeof body === "string" && body.trimStart().startsWith("**🤖 A2A**");
+}
+
+function shouldHonorCommentReopenIntent(input: {
+  body: unknown;
+  reopenRequested: boolean;
+  resumeRequested: boolean;
+}): boolean {
+  // OpenClaw's A2A bridge serializes orchestration records with this body marker
+  // and posts them as board-authored comments. Even if transport supplies `reopen`,
+  // a delayed stop/handoff must not revive terminal work; `resume` remains the
+  // explicit continuation signal.
+  if (input.resumeRequested) return true;
+  return input.reopenRequested && !isMachineGeneratedA2AComment(input.body);
+}
+
 function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   issueStatus: string | null | undefined;
   assigneeAgentId: string | null | undefined;
@@ -5168,7 +5185,11 @@ export function issueRoutes(
     }
     const isClosed = isClosedIssueStatus(issue.status);
     const isBlocked = issue.status === "blocked";
-    const explicitMoveToTodoRequested = reopenRequested || resumeRequested === true;
+    const explicitMoveToTodoRequested = shouldHonorCommentReopenIntent({
+      body: req.body.body,
+      reopenRequested,
+      resumeRequested: resumeRequested === true,
+    });
     const scheduledRetryForHumanComment =
       shouldHumanCommentResumeInProgressScheduledRetry({
         hasComment: true,
