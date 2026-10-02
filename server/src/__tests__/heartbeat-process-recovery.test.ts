@@ -593,6 +593,79 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(settledRun?.status).toBe("succeeded");
   });
 
+  // OPE-417: a run the orphan reaper finalized as process_lost while its gateway run was
+  // still live used to be rewritten when the adapter later returned: a clean exit became
+  // "Adapter failed"/adapter_failed and an adapter wait timeout became
+  // openclaw_gateway_wait_timeout, so the reap vanished from run metrics.
+  it.each([
+    {
+      name: "a clean adapter exit",
+      adapterResult: { exitCode: 0, signal: null, timedOut: false, errorMessage: null },
+    },
+    {
+      name: "an adapter wait timeout",
+      adapterResult: {
+        exitCode: null,
+        signal: null,
+        timedOut: true,
+        errorMessage: "OpenClaw gateway run timed out after 1200000ms",
+        errorCode: "openclaw_gateway_wait_timeout",
+      },
+    },
+  ])("keeps the process_lost classification when $name finalizes an already-reaped run", async ({ adapterResult }) => {
+    let releaseAdapter: (() => void) | null = null;
+    const adapterStarted = new Promise<void>((resolve) => {
+      mockAdapterExecute.mockImplementationOnce(async () => {
+        resolve();
+        await new Promise<void>((release) => {
+          releaseAdapter = release;
+        });
+        return { ...adapterResult, summary: "Remote run completed.", provider: "test", model: "test-model" };
+      });
+    });
+
+    const { runId } = await seedRunFixture({
+      adapterType: "openclaw_gateway",
+      agentStatus: "idle",
+      runStatus: "queued",
+      processPid: null,
+      processGroupId: null,
+      includeIssue: false,
+    });
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    await Promise.race([
+      adapterStarted,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timed out waiting for adapter execution to start")), 3_000);
+      }),
+    ]);
+
+    // The row as reapOrphanedRuns leaves it for a gateway run (no local pid, no retry).
+    const reapMessage = "Process lost -- server may have restarted";
+    await db
+      .update(heartbeatRuns)
+      .set({ status: "failed", error: reapMessage, errorCode: "process_lost", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, runId));
+
+    if (!releaseAdapter) throw new Error("Adapter release handle was not captured");
+    releaseAdapter();
+    const finalEvent = await waitForValue(() =>
+      db
+        .select()
+        .from(heartbeatRunEvents)
+        .where(and(eq(heartbeatRunEvents.runId, runId), eq(heartbeatRunEvents.message, "run failed")))
+        .then((rows) => rows[0] ?? null),
+    );
+    expect(finalEvent).not.toBeNull();
+
+    const run = await heartbeat.getRun(runId);
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("process_lost");
+    expect(run?.error).toBe(reapMessage);
+    expect(run?.resultJson).toMatchObject({ stopReason: "process_lost" });
+  });
+
   async function seedStrandedIssueFixture(input: {
     status: "todo" | "in_progress";
     runStatus: "failed" | "timed_out" | "cancelled" | "succeeded";

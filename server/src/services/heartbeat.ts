@@ -7956,23 +7956,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       } else {
         outcome = "failed";
       }
+      // The row can already be terminal when the adapter returns, most often because
+      // the orphan reaper finalized it as process_lost while the gateway run was still
+      // live (OPE-417). Keep the error the row was finalized with: replacing it with the
+      // adapter's defaults turned every such reap into "Adapter failed"/adapter_failed
+      // (or openclaw_gateway_wait_timeout), which hid the reap from run metrics and from
+      // every watcher keyed on errorCode.
+      const finalizedBeforeAdapterReturned =
+        isHeartbeatRunTerminalStatus(latestRun?.status) && latestRun.status !== "succeeded";
       const runErrorMessage =
         outcome === "cancelled"
           ? (latestRun?.error ?? adapterResult.errorMessage ?? "Cancelled")
           : outcome === "succeeded"
             ? null
-            : redactCurrentUserText(
-                adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
-                currentUserRedactionOptions,
-              );
+            : finalizedBeforeAdapterReturned && latestRun?.error
+              ? latestRun.error
+              : redactCurrentUserText(
+                  adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
+                  currentUserRedactionOptions,
+                );
       const runErrorCode =
-        outcome === "timed_out"
-          ? "timeout"
-          : outcome === "cancelled"
-            ? (latestRun?.errorCode ?? "cancelled")
-            : outcome === "failed"
-              ? (adapterResult.errorCode ?? "adapter_failed")
-              : null;
+        outcome === "cancelled"
+          ? (latestRun?.errorCode ?? "cancelled")
+          : outcome === "succeeded"
+            ? null
+            : finalizedBeforeAdapterReturned && latestRun?.errorCode
+              ? latestRun.errorCode
+              : outcome === "timed_out"
+                ? "timeout"
+                : (adapterResult.errorCode ?? "adapter_failed");
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
       if (handle) {
