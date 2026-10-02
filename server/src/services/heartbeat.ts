@@ -8287,6 +8287,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // DB calls threw (e.g. a transient DB error in finalizeAgentStatus).
           await finalizeAgentStatus(run.agentId, "failed").catch(() => undefined);
         } finally {
+          // First, before anything here can throw: activeRunExecutions is shared by every
+          // service instance, so a leaked id would hide a run stuck in "running" from all
+          // of their orphan reapers until the process restarts (OPE-417).
+          activeRunExecutions.delete(run.id);
           const latestRun = await getRun(run.id).catch(() => null);
           await releaseEnvironmentLeasesForRun({
             runId: run.id,
@@ -8296,7 +8300,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             failureReason: latestRun?.error ?? undefined,
           });
           await releaseRuntimeServicesForRun(run.id).catch(() => undefined);
-          activeRunExecutions.delete(run.id);
           await startNextQueuedRunForAgent(run.agentId);
         }
   }
