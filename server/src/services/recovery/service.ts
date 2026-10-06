@@ -53,6 +53,7 @@ import {
 } from "./origins.js";
 import {
   classifyIssueGraphLiveness,
+  hasScheduledMonitor,
   type IssueLivenessFinding,
 } from "./issue-graph-liveness.js";
 import {
@@ -2468,6 +2469,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         } else {
           result.skipped += 1;
         }
+        continue;
+      }
+
+      // A scheduled monitor is this issue's live execution path: the monitor tick wakes the
+      // assignee at nextCheckAt. Only an overdue, timed-out, or exhausted monitor counts as stranded.
+      if (hasScheduledMonitor(issue, Date.now())) {
+        result.skipped += 1;
         continue;
       }
 
