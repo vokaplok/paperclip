@@ -3089,6 +3089,64 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(result.issueIds).toEqual([issueId]);
   });
 
+  it("does not block a monitored issue whose continuation retry was cancelled as waiting on review (GEN-1776)", async () => {
+    // GEN-1496 on 2026-10-08: a productive run succeeded, recovery queued a continuation retry,
+    // the queued retry was cancelled with issue_continuation_waiting_on_review, and the next
+    // reconcile pass read that cancelled retry as a failed recovery and moved the issue to blocked,
+    // even though an external-service monitor was scheduled for the next day.
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runSource: "issue.productive_terminal_continuation_recovery",
+      runErrorCode: "issue_continuation_waiting_on_review",
+      runError:
+        "Cancelled because the continuation summary says the executor should wait for reviewer feedback or approval before more work starts",
+    });
+    const nextCheckAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const timeoutAt = new Date(Date.now() + 37 * 24 * 60 * 60 * 1000);
+    const monitor = {
+      kind: "external_service",
+      serviceName: "Google Search Console + GA4",
+      nextCheckAt: nextCheckAt.toISOString(),
+      timeoutAt: timeoutAt.toISOString(),
+      maxAttempts: 8,
+      recoveryPolicy: "wake_owner",
+      scheduledBy: "assignee",
+    };
+    await db
+      .update(issues)
+      .set({
+        monitorNextCheckAt: nextCheckAt,
+        monitorAttemptCount: 2,
+        executionPolicy: { mode: "normal", stages: [], monitor } as never,
+        executionState: { status: "idle", monitor: { ...monitor, status: "scheduled", attemptCount: 2 } } as never,
+      })
+      .where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.issueIds).toEqual([]);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+    expect(issue?.monitorNextCheckAt?.toISOString()).toBe(nextCheckAt.toISOString());
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs.map((row) => row.id)).toEqual([runId]);
+
+    const recoveryIssues = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stranded_issue_recovery")));
+    expect(recoveryIssues).toHaveLength(0);
+  });
+
   it("allows one productive-terminal recovery after regular continuation recovery made progress", async () => {
     const { agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
