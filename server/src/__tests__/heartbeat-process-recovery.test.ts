@@ -3065,6 +3065,42 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(issue?.status).toBe("blocked");
   });
 
+  it("still retries in-progress work whose latest run failed while a future monitor is scheduled", async () => {
+    // A failed or timed-out run is lost work (for example a comment wake that crashed), not a wait on
+    // the monitor, so it gets the normal continuation retry instead of waiting for nextCheckAt.
+    const { agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+    });
+    const nextCheckAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    await db
+      .update(issues)
+      .set({
+        monitorNextCheckAt: nextCheckAt,
+        executionState: {
+          status: "idle",
+          monitor: { status: "scheduled", nextCheckAt: nextCheckAt.toISOString(), attemptCount: 0, scheduledBy: "assignee" },
+        } as never,
+      })
+      .where(eq(issues.id, issueId));
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.continuationRequeued).toBe(1);
+    expect(result.escalated).toBe(0);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    const retry = runs.find((row) => row.id !== runId);
+    expect(retry?.contextSnapshot as Record<string, unknown> | undefined).toMatchObject({
+      retryReason: "issue_continuation_needed",
+    });
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+    expect(issue?.monitorNextCheckAt?.toISOString()).toBe(nextCheckAt.toISOString());
+  });
+
   it("still recovers in-progress work whose scheduled monitor has used all its attempts", async () => {
     const { issueId } = await seedStrandedIssueFixture({
       status: "in_progress",
