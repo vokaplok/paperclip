@@ -146,6 +146,7 @@ import {
   withRecoveryModelProfileHint,
 } from "./recovery/model-profile-hint.js";
 import { recoveryService } from "./recovery/service.js";
+import { hasScheduledMonitor } from "./recovery/issue-graph-liveness.js";
 import { productivityReviewService } from "./productivity-review.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import {
@@ -6134,6 +6135,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         details: Record<string, unknown>;
       };
 
+  // A review is requested when the execution state names a review request or a pending stage
+  // participant. Read the raw record so a state that fails the strict schema still counts.
+  function hasActiveReviewRequest(executionState: unknown) {
+    const state = parseObject(executionState);
+    if (state.reviewRequest != null) return true;
+    return state.status === "pending" && state.currentParticipant != null;
+  }
+
   async function evaluateQueuedRunStaleness(
     run: typeof heartbeatRuns.$inferSelect,
     issueId: string,
@@ -6146,6 +6155,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         assigneeAgentId: issues.assigneeAgentId,
         executionRunId: issues.executionRunId,
         executionState: issues.executionState,
+        executionPolicy: issues.executionPolicy,
+        monitorNextCheckAt: issues.monitorNextCheckAt,
+        monitorAttemptCount: issues.monitorAttemptCount,
       })
       .from(issues)
       .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
@@ -6179,7 +6191,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? null
         : await getIssueContinuationSummaryDocument(db, issueId);
       const continuationSummaryBody = queuedContinuationSummary ?? currentContinuationSummary?.body ?? null;
-      if (continuationSummaryParksExecutor(continuationSummaryBody)) {
+      // Summary text is a heuristic; the issue's own state outranks it. With no review requested
+      // and a future scheduled monitor, a "wait for review" next action is stale text, not a
+      // parked executor (GEN-1946, 2026-10-25).
+      const summaryContradictedByMonitor =
+        !hasActiveReviewRequest(issue.executionState) &&
+        hasScheduledMonitor(
+          {
+            executionPolicy: parseObject(issue.executionPolicy),
+            executionState: parseObject(issue.executionState),
+            monitorNextCheckAt: issue.monitorNextCheckAt,
+            monitorAttemptCount: issue.monitorAttemptCount,
+          },
+          Date.now(),
+        );
+      if (!summaryContradictedByMonitor && continuationSummaryParksExecutor(continuationSummaryBody)) {
         return {
           stale: true,
           errorCode: "issue_continuation_waiting_on_review",

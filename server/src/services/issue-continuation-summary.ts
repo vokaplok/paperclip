@@ -98,14 +98,32 @@ function inferMode(issue: IssueSummaryInput, run: RunSummaryInput) {
   return "implementation";
 }
 
+const DONE_NEXT_ACTION = "Review the completed issue output and close any remaining follow-up comments.";
+const IN_REVIEW_NEXT_ACTION = "Wait for reviewer feedback or approval before continuing executor work.";
+const FAILED_RUN_NEXT_ACTION =
+  "Inspect the failed run, fix the cause, and resume from the most recent concrete action above.";
+const CANCELLED_RUN_NEXT_ACTION = "Confirm the cancellation reason before starting another run.";
+const DEFAULT_NEXT_ACTION = "Resume implementation from the acceptance criteria, latest comments, and this summary.";
+
+// Next actions this builder derives from the issue status or the run status. They describe the
+// state that produced them, so they are recomputed on every rebuild and never carried forward.
+// Carrying IN_REVIEW_NEXT_ACTION into an in_progress summary made the queued-run gate park every
+// later continuation as issue_continuation_waiting_on_review (GEN-1946, 2026-10-25).
+const STATE_DERIVED_NEXT_ACTIONS = new Set([
+  DONE_NEXT_ACTION,
+  IN_REVIEW_NEXT_ACTION,
+  FAILED_RUN_NEXT_ACTION,
+  CANCELLED_RUN_NEXT_ACTION,
+]);
+
 function inferNextAction(issue: IssueSummaryInput, run: RunSummaryInput, previousNextAction: string | null) {
-  if (issue.status === "done") return "Review the completed issue output and close any remaining follow-up comments.";
-  if (issue.status === "in_review") return "Wait for reviewer feedback or approval before continuing executor work.";
-  if (run.status === "failed" || run.status === "timed_out") {
-    return "Inspect the failed run, fix the cause, and resume from the most recent concrete action above.";
-  }
-  if (run.status === "cancelled") return "Confirm the cancellation reason before starting another run.";
-  return previousNextAction ?? "Resume implementation from the acceptance criteria, latest comments, and this summary.";
+  if (issue.status === "done") return DONE_NEXT_ACTION;
+  if (issue.status === "in_review") return IN_REVIEW_NEXT_ACTION;
+  if (run.status === "failed" || run.status === "timed_out") return FAILED_RUN_NEXT_ACTION;
+  if (run.status === "cancelled") return CANCELLED_RUN_NEXT_ACTION;
+  const carriedNextAction =
+    previousNextAction && !STATE_DERIVED_NEXT_ACTIONS.has(previousNextAction) ? previousNextAction : null;
+  return carriedNextAction ?? DEFAULT_NEXT_ACTION;
 }
 
 function bulletList(items: string[], empty: string) {

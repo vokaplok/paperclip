@@ -935,4 +935,156 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(wakeup?.error).toContain("continuation summary says the executor should wait");
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
+
+  // GEN-1946 on 2026-10-25: in_progress, executionPolicy null, a state-only monitor scheduled by the
+  // assignee for a month later, no review request. The continuation summary still said "Wait for
+  // reviewer feedback or approval" from an earlier in_review revision. The queued continuation was
+  // cancelled as issue_continuation_waiting_on_review and stranded recovery then moved it to blocked.
+  async function seedGen1946Issue(input: {
+    companyId: string;
+    agentId: string;
+    nextCheckAt: Date;
+    reviewRequest?: { instructions: string } | null;
+  }) {
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId: input.companyId,
+      title: "Measure the 28-day LinkedIn-email CTA experiment",
+      status: "in_progress",
+      priority: "high",
+      assigneeAgentId: input.agentId,
+      monitorNextCheckAt: input.nextCheckAt,
+      monitorAttemptCount: 0,
+      executionPolicy: null,
+      executionState: {
+        status: "idle",
+        monitor: {
+          kind: null,
+          notes: "Run the complete 28-day GA4 CTA measurement after reporting lag.",
+          status: "scheduled",
+          clearedAt: null,
+          timeoutAt: null,
+          clearReason: null,
+          externalRef: null,
+          maxAttempts: null,
+          nextCheckAt: input.nextCheckAt.toISOString(),
+          scheduledBy: "assignee",
+          serviceName: null,
+          attemptCount: 0,
+          recoveryPolicy: null,
+          lastTriggeredAt: null,
+        },
+        reviewRequest: input.reviewRequest ?? null,
+        currentStageId: null,
+        lastDecisionId: null,
+        returnAssignee: null,
+        currentStageType: null,
+        completedStageIds: [],
+        currentStageIndex: null,
+        currentParticipant: null,
+        lastDecisionOutcome: null,
+      } as never,
+    });
+    await seedContinuationSummary({
+      companyId: input.companyId,
+      issueId,
+      agentId: input.agentId,
+      body: [
+        "# Continuation Summary",
+        "",
+        "- Issue: GEN-1946 — Measure the 28-day LinkedIn-email CTA experiment",
+        "- Status: in_progress",
+        "",
+        "## Next Action",
+        "",
+        "- Wait for reviewer feedback or approval before continuing executor work.",
+      ].join("\n"),
+    });
+    const queued = await seedQueuedRun({
+      companyId: input.companyId,
+      agentId: input.agentId,
+      issueId,
+      wakeReason: "issue_continuation_needed",
+      invocationSource: "automation",
+      contextExtras: {
+        retryReason: "issue_continuation_needed",
+        source: "issue.productive_terminal_continuation_recovery",
+      },
+    });
+    return { issueId, ...queued };
+  }
+
+  async function readRun(runId: string) {
+    return db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  it("does not park a continuation on stale review text while a future monitor is scheduled (GEN-1946)", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const nextCheckAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const { issueId, runId } = await seedGen1946Issue({ companyId, agentId, nextCheckAt });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => {
+      const run = await readRun(runId);
+      return run?.status !== "queued" && run?.status !== "running";
+    });
+
+    const run = await readRun(runId);
+    expect(run?.errorCode).not.toBe("issue_continuation_waiting_on_review");
+    expect(run?.status).toBe("succeeded");
+    expect(countExecuteCallsForRun(runId)).toBe(1);
+
+    // Two reconcile passes, as on 2026-10-25 (08:11:53Z and 08:13:23Z): the scheduled monitor is
+    // the live path, so the issue is neither requeued nor blocked, and the monitor survives.
+    for (let pass = 0; pass < 2; pass += 1) {
+      const result = await heartbeat.reconcileStrandedAssignedIssues();
+      expect(result.issueIds).not.toContain(issueId);
+    }
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+    expect(issue?.monitorNextCheckAt?.toISOString()).toBe(nextCheckAt.toISOString());
+    const runs = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    expect(runs.map((row) => row.id)).toEqual([runId]);
+  });
+
+  it("still parks a continuation on review text when the monitor is overdue", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const { runId } = await seedGen1946Issue({
+      companyId,
+      agentId,
+      nextCheckAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => (await readRun(runId))?.status === "cancelled");
+
+    const run = await readRun(runId);
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_continuation_waiting_on_review");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
+  it("still parks a continuation on review text when a review is requested, even with a future monitor", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const { runId } = await seedGen1946Issue({
+      companyId,
+      agentId,
+      nextCheckAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      reviewRequest: { instructions: "Check the verdict table before the executor continues." },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => (await readRun(runId))?.status === "cancelled");
+
+    const run = await readRun(runId);
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_continuation_waiting_on_review");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
 });

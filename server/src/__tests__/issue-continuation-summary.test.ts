@@ -112,4 +112,66 @@ describe("issue continuation summaries", () => {
 
     expect(continuationSummaryParksExecutor(body)).toBe(false);
   });
+
+  it("does not carry the in_review next action into a summary rebuilt after the issue left review (GEN-1946)", () => {
+    // GEN-1946 on 2026-10-25: revision 4 was written while the issue was in_review. Revisions 5
+    // and 6 were rebuilt with `Status: in_progress` but kept "Wait for reviewer feedback or
+    // approval", and the queued-run gate then cancelled the next continuation as
+    // issue_continuation_waiting_on_review.
+    const issue = {
+      id: "issue-1946",
+      identifier: "GEN-1946",
+      title: "Measure the 28-day LinkedIn-email CTA experiment",
+      description: null,
+      priority: "high",
+    };
+    const agent = { id: "agent-1", name: "chief-of-staff", adapterType: "openclaw_gateway" };
+    const inReviewBody = buildContinuationSummaryMarkdown({
+      issue: { ...issue, status: "in_review" },
+      run: { id: "run-review", status: "succeeded", error: null },
+      agent,
+    });
+    expect(continuationSummaryParksExecutor(inReviewBody)).toBe(true);
+
+    const inProgressBody = buildContinuationSummaryMarkdown({
+      issue: { ...issue, status: "in_progress" },
+      run: { id: "run-progress", status: "succeeded", error: null },
+      agent,
+      previousSummaryBody: inReviewBody,
+    });
+
+    expect(inProgressBody).toContain("- Status: in_progress");
+    expect(extractContinuationSummaryNextAction(inProgressBody)).toBe(
+      "Resume implementation from the acceptance criteria, latest comments, and this summary.",
+    );
+    expect(continuationSummaryParksExecutor(inProgressBody)).toBe(false);
+  });
+
+  it("still carries an agent-authored next action into the next in_progress summary", () => {
+    const previousSummaryBody = [
+      "# Continuation Summary",
+      "",
+      "## Next Action",
+      "",
+      "- Re-run the GA4 query for the full window, then post the verdict table.",
+    ].join("\n");
+
+    const body = buildContinuationSummaryMarkdown({
+      issue: {
+        id: "issue-1",
+        identifier: "GEN-1",
+        title: "Measure",
+        description: null,
+        status: "in_progress",
+        priority: "medium",
+      },
+      run: { id: "run-3", status: "succeeded", error: null },
+      agent: { id: "agent-1", name: "CodexCoder", adapterType: "codex_local" },
+      previousSummaryBody,
+    });
+
+    expect(extractContinuationSummaryNextAction(body)).toBe(
+      "Re-run the GA4 query for the full window, then post the verdict table.",
+    );
+  });
 });
