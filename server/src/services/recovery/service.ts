@@ -53,6 +53,7 @@ import {
 } from "./origins.js";
 import {
   classifyIssueGraphLiveness,
+  hasScheduledMonitor,
   type IssueLivenessFinding,
 } from "./issue-graph-liveness.js";
 import {
@@ -291,6 +292,10 @@ function isUnsuccessfulTerminalIssueRun(latestRun: LatestIssueRun) {
         latestRun.status as (typeof UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES)[number],
       ),
   );
+}
+
+function isFailedIssueRun(latestRun: LatestIssueRun) {
+  return latestRun?.status === "failed" || latestRun?.status === "timed_out";
 }
 
 function isSuccessfulInProgressContinuationRun(latestRun: LatestIssueRun): latestRun is SuccessfulLatestIssueRun {
@@ -2468,6 +2473,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         } else {
           result.skipped += 1;
         }
+        continue;
+      }
+
+      // A scheduled monitor is this issue's live execution path: the monitor tick wakes the
+      // assignee at nextCheckAt. Only an overdue, timed-out, or exhausted monitor counts as stranded.
+      // A latest run that failed or timed out is lost work, not a wait: it still gets the normal
+      // continuation retry instead of sitting until a nextCheckAt that may be weeks away.
+      if (hasScheduledMonitor(issue, Date.now()) && !isFailedIssueRun(latestRun)) {
+        result.skipped += 1;
         continue;
       }
 
