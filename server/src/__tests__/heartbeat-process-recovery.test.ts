@@ -682,6 +682,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     livenessState?: "completed" | "advanced" | "plan_only" | "empty_response" | "blocked" | "failed" | "needs_followup" | null;
     runErrorCode?: string | null;
     runError?: string | null;
+    scheduledMonitor?: { nextCheckAt: Date; timeoutAt?: Date | null };
   }) {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -783,6 +784,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         issueNumber: input.activePauseHold ? 2 : 1,
         identifier: `${issuePrefix}-${input.activePauseHold ? 2 : 1}`,
         startedAt: input.status === "in_progress" ? now : null,
+        ...(input.scheduledMonitor ? scheduledExternalServiceMonitorColumns(input.scheduledMonitor) : {}),
       },
     ]);
 
@@ -798,6 +800,49 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     }
 
     return { companyId, agentId, runId, wakeupRequestId, issueId, rootIssueId };
+  }
+
+  // Same shape GEN-2447 had when recovery blocked it: an assignee-scheduled
+  // external_service monitor, persisted in policy, state and the dispatch column.
+  function scheduledExternalServiceMonitorColumns(input: { nextCheckAt: Date; timeoutAt?: Date | null }) {
+    const monitor = {
+      kind: "external_service",
+      notes: "Run the approved dry-run at the scheduled checkpoint.",
+      timeoutAt: input.timeoutAt?.toISOString() ?? null,
+      externalRef: "github-actions:run",
+      maxAttempts: 100,
+      nextCheckAt: input.nextCheckAt.toISOString(),
+      scheduledBy: "assignee",
+      serviceName: "github-actions",
+      recoveryPolicy: "wake_owner",
+    };
+    return {
+      executionPolicy: { mode: "normal", stages: [], monitor, commentRequired: true },
+      executionState: {
+        status: "idle",
+        monitor: {
+          ...monitor,
+          status: "scheduled",
+          clearedAt: null,
+          clearReason: null,
+          attemptCount: 0,
+          lastTriggeredAt: null,
+        },
+        reviewRequest: null,
+        currentStageId: null,
+        lastDecisionId: null,
+        returnAssignee: null,
+        currentStageType: null,
+        completedStageIds: [],
+        currentStageIndex: null,
+        currentParticipant: null,
+        lastDecisionOutcome: null,
+      },
+      monitorNextCheckAt: input.nextCheckAt,
+      monitorAttemptCount: 0,
+      monitorNotes: monitor.notes,
+      monitorScheduledBy: "assignee",
+    };
   }
 
   async function seedAssignedTodoNoRunFixture(input?: {
@@ -3284,6 +3329,76 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(triggered?.monitorAttemptCount).toBe(5);
     expect(triggered?.monitorLastTriggeredAt?.toISOString()).toBe(tickAt.toISOString());
     await waitForHeartbeatIdle(db);
+  });
+
+  it("does not block in-progress work whose scheduled external-service monitor is its live path (GEN-2447)", async () => {
+    const nextCheckAt = new Date(Date.now() + 60 * 60 * 1000);
+    const { agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      retryReason: "issue_continuation_needed",
+      runSource: "issue.productive_terminal_continuation_recovery",
+      livenessState: "advanced",
+      scheduledMonitor: { nextCheckAt, timeoutAt: new Date(nextCheckAt.getTime() + 30 * 60 * 1000) },
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.issueIds).toEqual([]);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+    expect(issue?.monitorNextCheckAt?.toISOString()).toBe(nextCheckAt.toISOString());
+    expect((issue?.executionState as { monitor?: { status?: string } } | null)?.monitor?.status).toBe("scheduled");
+
+    const recoveryActions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(recoveryActions).toHaveLength(0);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
+    const wakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(1);
+  });
+
+  it("does not requeue an early continuation for in-progress work waiting on a scheduled monitor", async () => {
+    const { agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      livenessState: "advanced",
+      scheduledMonitor: { nextCheckAt: new Date(Date.now() + 60 * 60 * 1000) },
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.continuationRequeued).toBe(0);
+    expect(result.escalated).toBe(0);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("in_progress");
+    const wakeups = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(1);
+  });
+
+  it("still blocks in-progress work whose monitor has timed out", async () => {
+    const { issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      retryReason: "issue_continuation_needed",
+      runSource: "issue.productive_terminal_continuation_recovery",
+      livenessState: "advanced",
+      scheduledMonitor: {
+        nextCheckAt: new Date(Date.now() + 60 * 60 * 1000),
+        timeoutAt: new Date(Date.now() - 60 * 1000),
+      },
+    });
+    const heartbeat = heartbeatService(db);
+
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(1);
+
+    const issue = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue?.status).toBe("blocked");
   });
 
   it("allows one productive-terminal recovery after regular continuation recovery made progress", async () => {
